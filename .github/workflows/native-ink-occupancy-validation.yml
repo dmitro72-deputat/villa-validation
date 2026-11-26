@@ -1,0 +1,149 @@
+name: Villa native ink occupancy validation
+
+on:
+  push:
+    branches: [audit/native-ink-occupancy-ci]
+    paths: ['.github/workflows/native-ink-occupancy-validation.yml']
+
+permissions:
+  contents: read
+
+env:
+  AGENTS_AGENT_MODE: '1'
+  AGENTS_ALLOW_INSTALL: '1'
+  OMP_NUM_THREADS: '2'
+  MKL_NUM_THREADS: '2'
+  OPENBLAS_NUM_THREADS: '1'
+  WANDB_MODE: offline
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Checkout the candidate and its parent
+        uses: actions/checkout@v4
+        with:
+          ref: 64435e8acf3c1eb729d29bd6edc62e04bea91de1
+          fetch-depth: 2
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install scikit-build-core cmake ninja pybind11
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            nlohmann-json3-dev \
+            libboost-dev \
+            libconcurrentqueue-dev \
+            libcurl4-openssl-dev \
+            zlib1g-dev \
+            libsqlite3-dev \
+            libblosc-dev \
+            libzstd-dev \
+            liblz4-dev \
+            libtiff-dev \
+            libpng-dev \
+            libjpeg-dev \
+            pkg-config
+
+      - name: Build and install Blosc2
+        run: |
+          git clone --depth 1 --branch v2.15.2 \
+            https://github.com/Blosc/c-blosc2.git /tmp/c-blosc2
+          cmake -S /tmp/c-blosc2 -B /tmp/c-blosc2/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DBUILD_TESTS=OFF \
+            -DBUILD_BENCHMARKS=OFF \
+            -DBUILD_EXAMPLES=OFF
+          cmake --build /tmp/c-blosc2/build --parallel 2
+          sudo cmake --install /tmp/c-blosc2/build
+          sudo ldconfig
+          export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/usr/local/lib/x86_64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH}"
+          pkg-config --modversion blosc2
+          pkg-config --atleast-version=2.13 blosc2
+          echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
+
+      - name: Build VC Reader
+        env:
+          CMAKE_ARGS: "-DVC_READER_ENABLE_CUDA=OFF"
+        run: python -m pip install ./vc_reader
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install "./vesuvius[tests]"
+          python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install zarr scipy opencv-python-headless einops tqdm numba imagecodecs timm huggingface-hub fsspec aiohttp accelerate wandb pytorch-optimizer matplotlib scikit-image scikit-learn psutil click
+
+      - name: Run offline ink detection regressions
+        working-directory: vesuvius
+        run: python -m pytest -v -m 'not slow and not network' tests/ink_detection
+
+      - name: Compare the native planning CLI on PHerc. Paris. 4
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          source=vesuvius/src/vesuvius/ink_detection/inference/infer_full3d_tifxyz.py
+          cp "$source" "$tmp/candidate.py"
+          trap 'cp "$tmp/candidate.py" "$source"' EXIT
+          mkdir "$tmp/mesh"
+          base=https://vesuvius-challenge-open-data.s3.us-east-1.amazonaws.com/PHercParis4
+          mesh="$base/segments/20260604223808-20231210121321_v8/mesh/20260604223808-on-20260411134726-2.4um.tifxyz"
+          volume="$base/volumes/20260411134726-2.400um-0.2m-78keV-masked.zarr"
+          for f in x.tif y.tif z.tif meta.json; do
+            curl --fail --silent --show-error --retry 3 "$mesh/$f" -o "$tmp/mesh/$f"
+          done
+          mkdir -p "$tmp/ct.zarr/2"
+          for f in .zgroup .zattrs 2/.zarray; do
+            curl --fail --silent --show-error --retry 3 "$volume/$f" -o "$tmp/ct.zarr/$f"
+          done
+          printf '%s\n' "$tmp/ct.zarr" > "$tmp/mesh/volume_source.txt"
+          python - "$tmp" <<'PYTHON'
+          from pathlib import Path
+          import sys
+          import torch
+
+          root = Path(sys.argv[1])
+          config = {
+              "mode": "full_3d",
+              "model_type": "vesuvius_unet",
+              "targets": {"ink": {"out_channels": 1, "activation": "none"}},
+              "out_dir": str(root / "train"),
+              "patch_size": [128, 128, 128],
+              "datasets": [{
+                  "segments_path": str(root),
+                  "segments": ["mesh"],
+                  "volume_path": str(root / "ct.zarr"),
+                  "volume_scale": "2",
+              }],
+          }
+          torch.save({"config": config}, root / "plan-only.pth")
+          PYTHON
+          for version in before after; do
+            if [[ "$version" == before ]]; then
+              git show "HEAD^:$source" > "$source"
+            else
+              cp "$tmp/candidate.py" "$source"
+            fi
+            PYTHONPATH="$PWD/vesuvius/src" /usr/bin/time -f "$version wall=%e s peak=%M KiB" \
+              python -m vesuvius.ink_detection.inference.infer_full3d_tifxyz \
+              "$tmp/mesh" "$tmp/plan-only.pth" "$tmp/untouched.zarr" \
+              --resolution 2 --overlap 0.5 --chunk-halo 1 --max-target-chunks 512 --plan-only \
+              2>&1 | tee "$tmp/$version.log"
+            test ! -e "$tmp/untouched.zarr"
+            grep -Ei 'occupied|patches' "$tmp/$version.log" | cut -d']' -f2- > "$tmp/$version.plan"
+            test -s "$tmp/$version.plan"
+          done
+          diff -u "$tmp/before.plan" "$tmp/after.plan"
