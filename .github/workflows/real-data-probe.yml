@@ -1,0 +1,29 @@
+name: Real scroll data probe
+on:
+  workflow_dispatch:
+  push:
+    branches: [validation/inference-audit]
+    paths: ['.github/workflows/real-data-probe.yml']
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install 'zarr>=3,<4' fsspec aiohttp
+      - name: Read bounded real volume crop
+        run: |
+          python - <<'PY'
+          import zarr, numpy as np, hashlib, json
+          url = "https://vesuvius-challenge-open-data.s3.amazonaws.com/PHercParis4/volumes/20260310173927-45.532um-11.0m-110keV-masked.zarr"
+          a = zarr.open_group(url, mode="r")["0"]
+          print("shape", a.shape, "chunks", a.chunks, "dtype", a.dtype)
+          block = np.asarray(a[1024:1040,1408:1664,1408:1664])
+          assert block.shape == (16,256,256)
+          print(json.dumps(dict(shape=block.shape, bytes=block.nbytes, nonzero=int(np.count_nonzero(block)), sha256=hashlib.sha256(block.tobytes()).hexdigest())))
+          assert np.count_nonzero(block), "Crop contains no nonzero voxels"
+          PY
