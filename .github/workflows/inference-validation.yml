@@ -51,7 +51,26 @@ jobs:
             libjpeg-dev \
             pkg-config
 
+      - name: Build and install Blosc2
+        run: |
+          git clone --depth 1 --branch v2.15.2 \
+            https://github.com/Blosc/c-blosc2.git /tmp/c-blosc2
+          cmake -S /tmp/c-blosc2 -B /tmp/c-blosc2/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DBUILD_TESTS=OFF \
+            -DBUILD_BENCHMARKS=OFF
+          cmake --build /tmp/c-blosc2/build --parallel 2
+          sudo cmake --install /tmp/c-blosc2/build
+          sudo ldconfig
+          export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:${PKG_CONFIG_PATH}"
+          pkg-config --modversion blosc2
+          pkg-config --atleast-version=2.13 blosc2
+          echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
+
       - name: Build VC Reader
+        env:
+          CMAKE_ARGS: "-DVC_READER_ENABLE_CUDA=OFF"
         run: python -m pip install ./vc_reader
 
       - name: Install test dependencies
