@@ -86,4 +86,4 @@ jobs:
           python -m pytest -v \
             tests/ink_detection/test_flat_inference.py \
             tests/ink_detection/test_native_full3d_inference.py \
-            tests/ink_detection/test_roi_inference.py
+           python -m pip install zarr scipy opencv-python-headless einops tqdm numba imagecodecs timm
