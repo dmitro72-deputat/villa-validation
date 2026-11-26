@@ -1,6 +1,7 @@
 name: Villa native ink occupancy validation
 
 on:
+  workflow_dispatch:
   push:
     branches: [audit/native-ink-occupancy-ci]
     paths: ['.github/workflows/native-ink-occupancy-validation.yml']
@@ -119,9 +120,12 @@ jobs:
           config = {
               "mode": "full_3d",
               "model_type": "vesuvius_unet",
+              "in_channels": 1,
               "targets": {"ink": {"out_channels": 1, "activation": "none"}},
               "out_dir": str(root / "train"),
               "patch_size": [128, 128, 128],
+              "patch_overlap": 0.5,
+              "patch_min_labeled_coverage": 0.05,
               "datasets": [{
                   "segments_path": str(root),
                   "segments": ["mesh"],
