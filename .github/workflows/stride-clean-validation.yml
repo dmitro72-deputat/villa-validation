@@ -1,0 +1,92 @@
+
+name: Clean stride regression validation
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - validation/inference-audit
+    paths:
+      - '.github/workflows/stride-clean-validation.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: 3d22fc3dc8ef6b9f9150690263672ad8c5805db9
+          submodules: recursive
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install scikit-build-core cmake ninja pybind11
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            nlohmann-json3-dev \
+            libboost-dev \
+            libconcurrentqueue-dev \
+            libcurl4-openssl-dev \
+            zlib1g-dev \
+            libsqlite3-dev \
+            libblosc-dev \
+            libzstd-dev \
+            liblz4-dev \
+            libtiff-dev \
+            libpng-dev \
+            libjpeg-dev \
+            pkg-config
+
+      - name: Build and install Blosc2
+        run: |
+          git clone --depth 1 --branch v2.15.2 \
+            https://github.com/Blosc/c-blosc2.git /tmp/c-blosc2
+          cmake -S /tmp/c-blosc2 -B /tmp/c-blosc2/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DBUILD_TESTS=OFF \
+            -DBUILD_BENCHMARKS=OFF \
+            -DBUILD_EXAMPLES=OFF
+          cmake --build /tmp/c-blosc2/build --parallel 2
+          sudo cmake --install /tmp/c-blosc2/build
+          sudo ldconfig
+          export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/usr/local/lib/x86_64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH}"
+          pkg-config --modversion blosc2
+          pkg-config --atleast-version=2.13 blosc2
+          echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
+
+      - name: Build VC Reader
+        env:
+          CMAKE_ARGS: "-DVC_READER_ENABLE_CUDA=OFF"
+        run: python -m pip install ./vc_reader
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install "./vesuvius[tests]"
+          python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install zarr scipy opencv-python-headless einops tqdm numba imagecodecs timm
+
+      - name: Run inference tests
+        working-directory: vesuvius
+        run: |
+          python -m pytest -v \
+            tests/ink_detection/test_flat_inference.py \
+            tests/ink_detection/test_native_full3d_inference.py \
+            tests/ink_detection/test_roi_inference.py \
+            tests/ink_detection/test_data_foundation.py \
+            tests/ink_detection/test_volume_io.py
