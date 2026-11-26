@@ -124,42 +124,72 @@ def save_patch_cache(path: str | Path, patches: Iterable[Patch]) -> None:
     """Write the complete patch identity needed to reject stale caches."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    records = []
-    fingerprints: dict[tuple[int, str, int, str, str, str], str] = {}
-    for patch in patches:
-        segment = patch.segment
-        fingerprint = fingerprints.get(segment.cache_key)
-        if fingerprint is None:
-            fingerprint = fingerprints.setdefault(
-                segment.cache_key, _segment_label_fingerprint(segment)
-            )
-        records.append(
-            {
-                "dataset_idx": segment.dataset_idx,
-                "segment_relpath": segment.segment_relpath,
-                "scale": segment.scale,
-                "inklabels_path": "" if segment.inklabels is None else str(segment.inklabels),
-                "supervision_mask_path": (
-                    "" if segment.supervision_mask is None else str(segment.supervision_mask)
-                ),
-                "validation_mask_path": (
-                    "" if segment.validation_mask is None else str(segment.validation_mask)
-                ),
-                "label_fingerprint": fingerprint,
-                "active_supervision_mask_path": (
-                    "" if patch.supervision_mask is None else str(patch.supervision_mask)
-                ),
-                "is_validation": patch.is_validation,
-                "is_unlabeled": patch.is_unlabeled,
-                "exclude_validation_mask": patch.exclude_validation_mask,
-                "patch_finding_key": patch_finding_cache_token(
-                    segment.data_config
-                ),
-                "bbox": list(patch.bbox),
-            }
-        )
-    with path.open("w", encoding="utf-8") as stream:
-        json.dump(records, stream)
+    import tempfile
+
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, delete=False
+        ) as stream:
+            temporary = Path(stream.name)
+            stream.write("[")
+            first = True
+            records = []
+            fingerprints: dict[tuple[int, str, int, str, str, str], str] = {}
+            tokens = {}
+            for patch in patches:
+                segment = patch.segment
+                fingerprint = fingerprints.get(segment.cache_key)
+                if fingerprint is None:
+                    fingerprint = fingerprints.setdefault(
+                        segment.cache_key, _segment_label_fingerprint(segment)
+                    )
+                config = segment.data_config
+                key = id(config)
+                if key not in tokens:
+                    if len(tokens) >= 256:
+                        tokens.pop(next(iter(tokens)))
+                    tokens[key] = (config, patch_finding_cache_token(config))
+                records.append(
+                    {
+                        "dataset_idx": segment.dataset_idx,
+                        "segment_relpath": segment.segment_relpath,
+                        "scale": segment.scale,
+                        "inklabels_path": "" if segment.inklabels is None else str(segment.inklabels),
+                        "supervision_mask_path": (
+                            "" if segment.supervision_mask is None else str(segment.supervision_mask)
+                        ),
+                        "validation_mask_path": (
+                            "" if segment.validation_mask is None else str(segment.validation_mask)
+                        ),
+                        "label_fingerprint": fingerprint,
+                        "active_supervision_mask_path": (
+                            "" if patch.supervision_mask is None else str(patch.supervision_mask)
+                        ),
+                        "is_validation": patch.is_validation,
+                        "is_unlabeled": patch.is_unlabeled,
+                        "exclude_validation_mask": patch.exclude_validation_mask,
+                        "patch_finding_key": tokens[key][1],
+                        "bbox": list(patch.bbox),
+                    }
+                )
+                if len(records) == 1024:
+                    if not first:
+                        stream.write(", ")
+                    stream.write(json.dumps(records)[1:-1])
+                    records.clear()
+                    first = False
+            if records:
+                if not first:
+                    stream.write(", ")
+                stream.write(json.dumps(records)[1:-1])
+            stream.write("]")
+        if path.exists():
+            os.chmod(temporary, path.stat().st_mode & 0o777)
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def load_patch_cache(
