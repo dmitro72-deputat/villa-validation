@@ -1,0 +1,102 @@
+name: Villa sparse pyramid benchmark
+
+on:
+  push:
+    branches: [audit/sparse-pyramid-ci]
+    paths:
+      - '.github/workflows/sparse-pyramid-benchmark.yml'
+      - '.github/validation/sparse_pyramid_benchmark.py'
+
+permissions:
+  contents: read
+
+env:
+  AGENTS_AGENT_MODE: '1'
+  AGENTS_ALLOW_INSTALL: '1'
+  OPENBLAS_NUM_THREADS: '1'
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install scikit-build-core cmake ninja pybind11
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            nlohmann-json3-dev \
+            libboost-dev \
+            libconcurrentqueue-dev \
+            libcurl4-openssl-dev \
+            zlib1g-dev \
+            libsqlite3-dev \
+            libblosc-dev \
+            libzstd-dev \
+            liblz4-dev \
+            libtiff-dev \
+            libpng-dev \
+            libjpeg-dev \
+            pkg-config strace
+
+      - name: Build and install Blosc2
+        run: |
+          git clone --depth 1 --branch v2.15.2 \
+            https://github.com/Blosc/c-blosc2.git /tmp/c-blosc2
+          cmake -S /tmp/c-blosc2 -B /tmp/c-blosc2/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DBUILD_TESTS=OFF \
+            -DBUILD_BENCHMARKS=OFF \
+            -DBUILD_EXAMPLES=OFF
+          cmake --build /tmp/c-blosc2/build --parallel 2
+          sudo cmake --install /tmp/c-blosc2/build
+          sudo ldconfig
+          export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/usr/local/lib/x86_64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH}"
+          pkg-config --modversion blosc2
+          pkg-config --atleast-version=2.13 blosc2
+          echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
+
+      - name: Build VC Reader
+        env:
+          CMAKE_ARGS: "-DVC_READER_ENABLE_CUDA=OFF"
+        run: python -m pip install ./vc_reader pytest
+
+      - name: Measure the published Paris 4 prediction subset
+        shell: bash
+        run: |
+          set -euo pipefail
+          source=vesuvius/src/vesuvius/ink_detection/inference/infer_full3d_tifxyz.py
+          script=.github/validation/sparse_pyramid_benchmark.py
+          work="$(mktemp -d)"
+          python "$script" prepare "$source" "$work/template"
+          for n in 1 2 3; do
+            cp -r "$work/template" "$work/result"
+            python "$script" run "$source" "$work/result"
+            python "$script" manifest "$source" "$work/result" > "$work/manifest.$n"
+            rm -r "$work/result"
+          done
+          cmp "$work/manifest.1" "$work/manifest.2"
+          cmp "$work/manifest.1" "$work/manifest.3"
+          sha256sum "$work/manifest.1"
+          wc -l "$work/manifest.1"
+          cp -r "$work/template" "$work/result"
+          strace -ff -qq -yy -o "$work/syscalls" \
+            -e trace=openat,newfstatat,statx,unlink,unlinkat,rename,renameat,renameat2,getdents64,read,pread64,write,pwrite64 \
+            python "$script" run "$source" "$work/result"
+          python "$script" trace "$source" "$work/result" --trace-prefix "$work/syscalls"
+          python "$script" manifest "$source" "$work/result" > "$work/manifest.trace"
+          cmp "$work/manifest.1" "$work/manifest.trace"
