@@ -167,6 +167,38 @@ def test_occupied_plan_handles_boundaries_halo_stride_and_truncation():
     assert truncated.target_chunks == frozenset(sorted(halo.expanded_chunks)[:2])
 
 
+def test_occupied_chunks_deduplicates_across_strided_blocks():
+    xyz = np.zeros((513, 513, 3), dtype=np.float32)[::-1, ::-1]
+    valid = np.ones((513, 513), dtype=bool)[::-1, ::-1]
+    xyz[0, 0] = (4.9, 5.9, 6.9)
+    xyz[-1, -1] = (4.9, 5.9, 6.9)
+    xyz[0, 1] = (5.0, 0.0, 0.0)
+    xyz[0, 2] = (-0.1, 0.0, 0.0)
+    xyz[0, 3] = (2.0, 0.0, 0.0)
+    valid[0, 3] = False
+
+    chunks = native.tifxyz_occupied_chunks(
+        x=xyz[..., 0], y=xyz[..., 1], z=xyz[..., 2], valid=valid,
+        array_shape_zyx=(7, 6, 5), chunk_shape_zyx=(3, 2, 2),
+    )
+
+    assert chunks == {native.ChunkId(0, 0, 0), native.ChunkId(2, 2, 2)}
+
+
+@pytest.mark.parametrize(
+    ("valid", "message"),
+    [(False, "No finite non-negative tifxyz points"), (True, "No tifxyz points fall inside")],
+)
+def test_occupied_chunks_reports_why_no_points_were_used(valid, message):
+    with pytest.raises(ValueError, match=message):
+        _plan(
+            x=np.full((1, 1), 8.0),
+            y=np.zeros((1, 1)),
+            z=np.zeros((1, 1)),
+            valid=np.full((1, 1), valid),
+        )
+
+
 def test_patch_lattice_covers_small_volume_and_validates_direct_calls():
     small = _plan(
         array_shape_zyx=(3, 4, 2),
