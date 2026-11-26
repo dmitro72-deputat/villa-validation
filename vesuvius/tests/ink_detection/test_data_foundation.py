@@ -1469,3 +1469,23 @@ def test_full_3d_merges_intersecting_segment_supervision(tmp_path, monkeypatch):
     expected_labels[1, 2, 2] = 1
     np.testing.assert_array_equal(supervision, expected_supervision)
     np.testing.assert_array_equal(labels, expected_labels)
+
+
+@pytest.mark.parametrize("scale_y,scale_x,height,width", [(1,4,8,8),(4,1,8,8),(1,1,8,4)])
+@pytest.mark.parametrize("labeled", [True, False])
+def test_default_patch_discovery_independent_xy_stride(tmp_path, scale_y, scale_x, height, width, labeled):
+    config = _config(tmp_path, patch_size=[3,height,width], patch_overlap=1.0)
+    config = replace(config, patch_finding=replace(config.patch_finding, scan_scale=1))
+    segment = _segment(config, tmp_path, image_volume="image")
+    if labeled:
+        segment = replace(segment, inklabels=Path("labels"), supervision_mask=Path("supervision"))
+    full = np.ones((3,32,32), dtype=np.uint8)
+    scan = full[:,::scale_y,::scale_x]
+    def opener(path, resolution):
+        return full if resolution == 0 else scan
+    finder = find_segment_patches if labeled else find_segment_unlabeled_patches
+    patches, held_out = finder(segment, opener)
+    expected = [(0,y,x,3,y+height,x+width)
+                for y in range(0,32,height) for x in range(0,32,width)]
+    assert [p.bbox for p in patches] == expected
+    assert not held_out
