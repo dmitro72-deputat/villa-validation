@@ -12,9 +12,9 @@ from vesuvius.ink_detection.config import InkDataConfig
 from vesuvius.ink_detection.types import Patch, Segment
 
 
-_CACHE_VERSION = "v6"
-# Default discovery now measures coverage at the ink store's own mid-plane.
-_LABELED_DEFAULT_CACHE_VERSION = "v7"
+# Default discovery uses independent strides for the Y and X axes.
+_UNLABELED_DEFAULT_CACHE_VERSION = "v7"
+_LABELED_DEFAULT_CACHE_VERSION = "v8"
 # Subtiling caches written before the patch Z window came from the image mid-plane hold label-based Z.
 _SUBTILING_CACHE_VERSION = "v7"
 
@@ -84,7 +84,7 @@ def patch_finding_cache_token(config: InkDataConfig) -> str:
     finding = config.patch_finding
     patch_y = config.patch_size[1]
     default_stride = int(patch_y * finding.overlap)
-    if finding.kind == "subtiling":
+    if finding.kind == "subtiling" and config.discovery_mode == "labeled":
         tile_size = patch_y if finding.tile_size is None else finding.tile_size
         stride = default_stride if finding.stride is None else finding.stride
         return (
@@ -95,7 +95,7 @@ def patch_finding_cache_token(config: InkDataConfig) -> str:
     if config.discovery_mode == "unlabeled":
         # The reference spelled its unused option default here; keep token compatibility.
         return (
-            f"unlabeled-default-{_CACHE_VERSION}"
+            f"unlabeled-default-{_UNLABELED_DEFAULT_CACHE_VERSION}"
             f"-po-{finding.overlap}"
             "-mdc-0.15"
             f"-pfs-{scan_scale}"
@@ -177,6 +177,14 @@ def load_patch_cache(
         (*segment.cache_key, _segment_label_fingerprint(segment)): segment
         for segment in segments
     }
+    # Empty arrays at a custom path carry no token from the writer that produced them.
+    if (
+        not records
+        and segments_by_key
+        and config.discovery_mode == "unlabeled"
+        and config.patch_cache_filename is not None
+    ):
+        return None
     expected_token = patch_finding_cache_token(config)
     patches: list[Patch] = []
     for record in records:

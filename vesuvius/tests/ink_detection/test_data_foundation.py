@@ -464,7 +464,7 @@ def test_patch_cache_round_trip_and_stale_rejection(tmp_path):
     assert loaded[0].is_validation
     assert loaded[0].supervision_mask == str(segment.validation_mask)
     assert replace(patch, supervision_mask_override="").supervision_mask == ""
-    assert "labeled-default-v7" in patch_finding_cache_token(config)
+    assert "labeled-default-v8" in patch_finding_cache_token(config)
 
     changed = _config(tmp_path, patch_overlap=0.25)
     assert load_patch_cache(path, config=changed, segments=[segment]) is None
@@ -601,7 +601,7 @@ def test_unlabeled_coverage_key_is_rejected_and_cache_token_stays_compatible(tmp
         ],
     )
     assert patch_finding_cache_token(unlabeled) == (
-        "unlabeled-default-v6-po-0.5-mdc-0.15-pfs-"
+        "unlabeled-default-v7-po-0.5-mdc-0.15-pfs-"
     )
 
     with pytest.raises(
@@ -1489,3 +1489,32 @@ def test_default_patch_discovery_independent_xy_stride(tmp_path, scale_y, scale_
                 for y in range(0,32,height) for x in range(0,32,width)]
     assert [p.bbox for p in patches] == expected
     assert not held_out
+
+
+@pytest.mark.parametrize(
+    "mode,kind,old_token",
+    [
+        ("labeled", "default", "labeled-default-v7-po-0.5-mlc-0.0-pfs-"),
+        ("unlabeled", "default", "unlabeled-default-v6-po-0.5-mdc-0.15-pfs-"),
+        ("unlabeled", "subtiling", "unlabeled-subtiling-v7-ts-8_st-4_fe-1"),
+    ],
+)
+def test_default_patch_cache_rejects_shared_stride_records(tmp_path, mode, kind, old_token):
+    config = _config(
+        tmp_path,
+        patch_size=[3, 8, 4],
+        patch_finding_type=kind,
+        patch_finding_filter_empty_tile=True,
+    )
+    path = tmp_path / "custom.json"
+    config = replace(config, discovery_mode=mode, patch_cache_filename=path)
+    segment = _segment(config, tmp_path)
+    save_patch_cache(path, [Patch(segment=segment, bbox=(0, 0, 0, 3, 8, 4))])
+    records = json.loads(path.read_text())
+    assert records[0]["patch_finding_key"] != old_token
+    records[0]["patch_finding_key"] = old_token
+    path.write_text(json.dumps(records))
+    assert load_patch_cache(path, config=config, segments=[segment]) is None
+
+    path.write_text("[]")
+    assert load_patch_cache(path, config=config, segments=[segment]) is None
