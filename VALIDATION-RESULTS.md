@@ -28,3 +28,12 @@ Tested fork commit: 6b9dd4d1c8d85fd8851bda1762d767f300131da1.
 
 ## Review status
 Candidate contributions, not yet accepted upstream. Exact upstream base SHA and award eligibility remain to be confirmed. No prize or payment is claimed.
+
+
+## Independent contribution validation
+
+- Upstream comparison base: 659e2fadb836d44063ed831d85517154ec852f11.
+- Stride branch: fix/anisotropic-patch-stride, tested commit 3d22fc3dc8ef6b9f9150690263672ad8c5805db9. All 132 tests passed, including six new anisotropic and rectangular patch regression cases, in 15.53 seconds. [CI](https://github.com/dmitro72-deputat/villa-validation/actions/runs/45821326944).
+- Cache branch: perf/patch-cache-memory, tested commit aa60826e422dfe32ec8b01de1c8ab1c92f0247f9. All 126 existing tests passed in 14.29 seconds. [CI](https://github.com/dmitro72-deputat/villa-validation/actions/runs/45833689725).
+- These test durations are not comparable performance measurements.
+- Independent cache benchmark: [CI](https://github.com/dmitro72-deputat/villa-validation/actions/runs/45836348251), results pending. Actual serialization functions, synthetic records, Python allocation peak rather than process RSS.
