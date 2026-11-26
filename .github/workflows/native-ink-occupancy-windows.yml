@@ -1,0 +1,83 @@
+name: Villa native ink occupancy on Windows
+
+on:
+  push:
+    branches: [audit/native-ink-occupancy-ci]
+    paths: ['.github/workflows/native-ink-occupancy-windows.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  occupancy:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - name: Checkout the candidate and its parent
+        uses: actions/checkout@v4
+        with:
+          ref: 64435e8acf3c1eb729d29bd6edc62e04bea91de1
+          fetch-depth: 2
+          persist-credentials: false
+          sparse-checkout: vesuvius/src/vesuvius/ink_detection/inference
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Install planner-only dependencies
+        run: python -m pip install numpy pillow
+
+      - name: Compare occupancy on PHerc. 0139
+        shell: pwsh
+        run: |
+          @'
+          import ast
+          from dataclasses import dataclass
+          import hashlib
+          import io
+          import json
+          from pathlib import Path
+          import subprocess
+          import sys
+          from urllib.request import urlopen
+
+          import numpy as np
+          from PIL import Image
+
+          def occupancy(source):
+              tree = ast.parse(source)
+              nodes = [node for node in tree.body if getattr(node, "name", "")
+                       in {"ChunkId", "tifxyz_occupied_chunks"}]
+              header = ast.parse("from __future__ import annotations").body
+              scope = {"np": np, "dataclass": dataclass}
+              exec(compile(ast.Module(body=header + nodes, type_ignores=[]), "<planner>", "exec"), scope)
+              return scope["tifxyz_occupied_chunks"]
+
+          base = "https://vesuvius-challenge-open-data.s3.us-east-1.amazonaws.com/PHerc0139"
+          mesh = base + "/segments/20260317000000-w035_2026031718/mesh/20260317000000-on-20250728140407-9.362um.tifxyz"
+          volume = base + "/volumes/20250728140407-9.362um-1.2m-113keV-masked.zarr"
+          with urlopen(volume + "/0/.zarray", timeout=30) as response:
+              metadata = json.load(response)
+          coords = []
+          for axis in "xyz":
+              with urlopen(f"{mesh}/{axis}.tif", timeout=30) as response:
+                  with Image.open(io.BytesIO(response.read())) as image:
+                      coords.append(np.array(image))
+          xyz = np.stack(coords, axis=-1)
+          valid = ((xyz >= 0) & np.isfinite(xyz)).all(axis=-1)
+          kwargs = dict(x=xyz[..., 0], y=xyz[..., 1], z=xyz[..., 2], valid=valid,
+                        array_shape_zyx=metadata["shape"], chunk_shape_zyx=metadata["chunks"])
+          source_path = "vesuvius/src/vesuvius/ink_detection/inference/infer_full3d_tifxyz.py"
+          before = subprocess.check_output(["git", "show", f"HEAD^:{source_path}"], text=True, encoding="utf-8")
+          after = Path(source_path).read_text(encoding="utf-8")
+          signatures = []
+          for source in (before, after):
+              chunks = sorted((c.z, c.y, c.x) for c in occupancy(source)(**kwargs))
+              signatures.append(hashlib.sha256(repr(chunks).encode()).hexdigest())
+              assert len(chunks) == 2164, len(chunks)
+          assert signatures[0] == signatures[1], signatures
+          print(f"{sys.platform}, NumPy {np.__version__}: 2164 identical chunks, SHA-256 {signatures[0]}")
+          '@ | Set-Content -Encoding utf8 "$env:RUNNER_TEMP/planner_smoke.py"
+          python "$env:RUNNER_TEMP/planner_smoke.py"
