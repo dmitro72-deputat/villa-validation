@@ -3,6 +3,11 @@ name: Villa Inference Validation
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - validation/inference-audit
+    paths:
+      - '.github/workflows/inference-validation.yml'
 
 permissions:
   contents: read
