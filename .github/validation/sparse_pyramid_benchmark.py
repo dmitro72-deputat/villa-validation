@@ -12,7 +12,7 @@ import resource
 import time
 from urllib.request import urlopen
 
-from vc_reader.reader import create_group, ome_multiscales, open_group, open_zarr, write_pyramid_level
+from vc_reader.reader import ZarrWriter, create_group, ome_multiscales, open_zarr, write_pyramid_level
 
 BASE = (
     "https://vesuvius-challenge-open-data.s3.us-east-1.amazonaws.com/PHercParis4/"
@@ -70,7 +70,7 @@ def proc_io():
 
 
 def run(native, path, workers):
-    arrays = [open_group(path)[str(level)] for level in range(6)]
+    arrays = [ZarrWriter.open(path / str(level), auth=None) for level in range(6)]
     sources = {native["ChunkId"](*map(int, key.split("/"))) for key in KEYS}
     build = native["build_downsample_levels"]
     options = {}
