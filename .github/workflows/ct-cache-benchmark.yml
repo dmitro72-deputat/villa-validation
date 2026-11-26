@@ -1,0 +1,72 @@
+name: CT-derived cache writer benchmark
+on:
+  push:
+    branches: [validation/inference-audit]
+    paths: ['.github/workflows/ct-cache-benchmark.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install 'zarr>=3,<4' fsspec aiohttp numpy
+      - run: |
+          git show 659e2fadb836d44063ed831d85517154ec852f11:vesuvius/src/vesuvius/ink_detection/data/patch_cache.py > /tmp/original.py
+          git apply villa-cache-integrated.patch villa-stride-fix.patch
+          python - <<'PY'
+          import ast, hashlib, json, pathlib, statistics, tempfile, time, tracemalloc
+          from types import SimpleNamespace as NS
+          def load(path):
+              tree = ast.parse(pathlib.Path(path).read_text())
+              tree.body = [n for n in tree.body if not (isinstance(n, ast.ImportFrom) and n.module.startswith("vesuvius."))]
+              ns = {}
+              exec(compile(tree,path,"exec"),ns)
+              return ns["save_patch_cache"]
+          funcs = [load("/tmp/original.py"),load("vesuvius/src/vesuvius/ink_detection/data/patch_cache.py")]
+          configs = [NS(patch_size=(16,32,32),discovery_mode="labeled",patch_finding=NS(kind="default",overlap=.5,min_labeled_coverage=i/100,scan_scale=None)) for i in range(10)]
+          segments = [NS(cache_key=(i,"segment",0,"","",""),dataset_idx=i,segment_relpath="segment",scale=0,inklabels=None,supervision_mask=None,validation_mask=None,data_config=c) for i,c in enumerate(configs)]
+          import numpy as np, zarr, sys, types
+          m = types.ModuleType("vesuvius.ink_detection.types")
+          m.Patch = NS
+          m.Segment = NS
+          sys.modules[m.__name__] = m
+          a = zarr.open_group("https://vesuvius-challenge-open-data.s3.amazonaws.com/PHercParis4/volumes/20260310173927-45.532um-11.0m-110keV-masked.zarr", mode="r")["0"]
+          full = np.asarray(a[1024:1040,1408:1664,1408:1664])
+          assert hashlib.sha256(full.tobytes()).hexdigest()=="c3167593f37f1ce2f87dba3048237e676462a0e6b4860b98f74586a271fe4840"
+          ns = {}
+          p = pathlib.Path("vesuvius/src/vesuvius/ink_detection/data/patch_finding_default.py")
+          exec(compile(p.read_text(),str(p),"exec"),ns)
+          seg = NS(image_volume="image",scale=0,patch_size=(16,32,32),supervision_mask=None,validation_mask=None,data_config=NS(patch_finding=NS(scan_scale=0,overlap=0.5)))
+          found,_ = ns["find_segment_unlabeled_patches"](seg,lambda p,s: full)
+          patches = [NS(segment=segments[0],supervision_mask=None,is_validation=False,is_unlabeled=True,exclude_validation_mask=False,bbox=p.bbox) for p in found]
+          assert patches
+          print("CT-derived records:",len(patches))
+          results = [[],[]]
+          hashes = set()
+          with tempfile.TemporaryDirectory() as d:
+              for repeat in range(3):
+                  for i in ([0,1] if repeat%2==0 else [1,0]):
+                      path = pathlib.Path(d)/str(i)
+                      start = time.perf_counter()
+                      funcs[i](path,iter(patches))
+                      elapsed = time.perf_counter()-start
+                      tracemalloc.start()
+                      funcs[i](path,iter(patches))
+                      _,peak = tracemalloc.get_traced_memory()
+                      tracemalloc.stop()
+                      digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                      hashes.add(digest)
+                      results[i].append((elapsed,peak/1048576))
+                      print(json.dumps(dict(version=i,repeat=repeat,seconds=elapsed,peak_mib=peak/1048576,sha256=digest,bytes=path.stat().st_size)))
+              assert len(hashes)==1
+          for i,rows in enumerate(results):
+              print(json.dumps(dict(version=i,median_seconds=statistics.median(x[0] for x in rows),median_peak_mib=statistics.median(x[1] for x in rows))))
+          PY
