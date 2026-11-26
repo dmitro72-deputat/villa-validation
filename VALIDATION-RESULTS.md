@@ -37,3 +37,16 @@ Candidate contributions, not yet accepted upstream. Exact upstream base SHA and 
 - Cache branch: perf/patch-cache-memory, tested commit aa60826e422dfe32ec8b01de1c8ab1c92f0247f9. All 126 existing tests passed in 14.29 seconds. [CI](https://github.com/dmitro72-deputat/villa-validation/actions/runs/45833689725).
 - These test durations are not comparable performance measurements.
 - Independent cache benchmark: [CI](https://github.com/dmitro72-deputat/villa-validation/actions/runs/45836348251), results pending. Actual serialization functions, synthetic records, Python allocation peak rather than process RSS.
+
+
+## Completed cache benchmark
+GitHub Actions run 45836348251 succeeded on CPython 3.12.16. Actual writer functions, 100,000 synthetic records, ten configurations, three repetitions per version, separate timing and tracemalloc runs.
+
+| Metric | Original | Patched |
+|---|---:|---:|
+| Median elapsed seconds | 1.509116327 | 0.354257077 |
+| Median peak traced MiB | 62.605872154 | 1.355607986 |
+
+Speedup: 4.26x. Peak traced allocation reduction: 97.83%.
+All six measured output files: 40067918 bytes, SHA-256 9cd4c9834deef8d044a9c0eee558dc5018ba31ec99ee20569e597e105e5ea7b1.
+Limitations: synthetic inputs with lightweight objects, preallocated input records excluded from traced peak, not process RSS or full pipeline speedup. [Benchmark logs](https://github.com/dmitro72-deputat/villa-validation/actions/runs/45836348251).
