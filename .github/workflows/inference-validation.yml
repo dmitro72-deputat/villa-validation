@@ -23,6 +23,12 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Apply validation patches
+        run: |
+          git apply --check villa-cache-integrated.patch villa-stride-fix.patch
+          git apply villa-cache-integrated.patch villa-stride-fix.patch
+          git diff --stat
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -86,4 +92,6 @@ jobs:
           python -m pytest -v \
             tests/ink_detection/test_flat_inference.py \
             tests/ink_detection/test_native_full3d_inference.py \
-            tests/ink_detection/test_roi_inference.py
+            tests/ink_detection/test_roi_inference.py \
+            tests/ink_detection/test_data_foundation.py \
+            tests/ink_detection/test_volume_io.py
