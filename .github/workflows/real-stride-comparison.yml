@@ -1,0 +1,46 @@
+name: Real CT stride comparison
+on:
+  push:
+    branches: [validation/inference-audit]
+    paths: ['.github/workflows/real-stride-comparison.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install 'zarr>=3,<4' fsspec aiohttp
+      - run: |
+          cp vesuvius/src/vesuvius/ink_detection/data/patch_finding_default.py /tmp/original.py
+          git apply villa-stride-fix.patch
+          python - <<'PY'
+          import numpy as np, zarr, hashlib, types, sys, json
+          from types import SimpleNamespace as NS
+          from pathlib import Path
+          m = types.ModuleType("vesuvius.ink_detection.types")
+          m.Patch = NS
+          m.Segment = NS
+          sys.modules[m.__name__] = m
+          a = zarr.open_group("https://vesuvius-challenge-open-data.s3.amazonaws.com/PHercParis4/volumes/20260310173927-45.532um-11.0m-110keV-masked.zarr", mode="r")["0"]
+          full = np.asarray(a[1024:1040,1408:1664,1408:1664])
+          assert hashlib.sha256(full.tobytes()).hexdigest() == "c3167593f37f1ce2f87dba3048237e676462a0e6b4860b98f74586a271fe4840"
+          for sy,sx in [(1,1),(1,4),(4,1)]:
+              scan = full[:,::sy,::sx]
+              support = full[8] != 0
+              for name,path in [("original","/tmp/original.py"),("patched","vesuvius/src/vesuvius/ink_detection/data/patch_finding_default.py")]:
+                  ns = {}
+                  exec(compile(Path(path).read_text(),path,"exec"),ns)
+                  seg = NS(image_volume="image",scale=0,patch_size=(16,32,32),supervision_mask=None,validation_mask=None,data_config=NS(patch_finding=NS(scan_scale=1,overlap=0.5)))
+                  patches,_ = ns["find_segment_unlabeled_patches"](seg,lambda p,s: full if s==0 else scan)
+                  covered = np.zeros(support.shape,bool)
+                  for p in patches:
+                      _,y,x,_,ye,xe = p.bbox
+                      covered[y:ye,x:xe] = True
+                  print(json.dumps(dict(version=name,scale_y=sy,scale_x=sx,patches=len(patches),support_pixels=int(support.sum()),covered_support=int((covered & support).sum()),coverage=float((covered & support).sum()/support.sum()))))
+          PY
