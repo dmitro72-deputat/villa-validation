@@ -470,6 +470,34 @@ def test_patch_cache_round_trip_and_stale_rejection(tmp_path):
     assert load_patch_cache(path, config=changed, segments=[segment]) is None
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Requires POSIX file modes and symbolic links")
+def test_patch_cache_atomic_write_preserves_permissions_and_symlink(tmp_path):
+    config = _config(tmp_path)
+    segment = _segment(config, tmp_path)
+    patch = Patch(segment=segment, bbox=(0, 0, 0, 3, 8, 8))
+    target = tmp_path / "target.json"
+    alias = tmp_path / "cache.json"
+    alias.symlink_to(target.name)
+    old_umask = os.umask(0o027)
+    try:
+        save_patch_cache(alias, [patch])
+    finally:
+        os.umask(old_umask)
+    assert alias.is_symlink()
+    assert target.stat().st_mode & 0o777 == 0o640
+    previous = target.read_bytes()
+
+    def broken_patches():
+        for _ in range(1024):
+            yield patch
+        raise RuntimeError("patch discovery failed")
+
+    with pytest.raises(RuntimeError, match="patch discovery failed"):
+        save_patch_cache(alias, broken_patches())
+    assert target.read_bytes() == previous
+    assert sorted(tmp_path.iterdir()) == [alias, target]
+
+
 def test_default_cache_rejects_old_mixed_depth_coverage(tmp_path):
     config = _config(tmp_path, patch_overlap=1.0, patch_min_labeled_coverage=0.1)
     image = np.ones((7, 2, 4), dtype=np.uint8)

@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
+import tempfile
 from pathlib import Path
 from typing import Iterable, Mapping
 
@@ -124,15 +126,11 @@ def save_patch_cache(path: str | Path, patches: Iterable[Patch]) -> None:
     """Write the complete patch identity needed to reject stale caches."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    import tempfile
-
-    temporary = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=path.parent, delete=False
-        ) as stream:
-            temporary = Path(stream.name)
-            stream.write("[")
+    # Keep writing through an explicitly configured cache symlink.
+    path = path.resolve()
+    with tempfile.TemporaryDirectory(dir=path.parent) as directory:
+        temporary = Path(directory) / "patch-cache.json"
+        with temporary.open("w", encoding="utf-8") as stream:
             first = True
             records = []
             fingerprints: dict[tuple[int, str, int, str, str, str], str] = {}
@@ -174,22 +172,28 @@ def save_patch_cache(path: str | Path, patches: Iterable[Patch]) -> None:
                     }
                 )
                 if len(records) == 1024:
-                    if not first:
-                        stream.write(", ")
+                    stream.write("[" if first else ", ")
                     stream.write(json.dumps(records)[1:-1])
                     records.clear()
                     first = False
-            if records:
-                if not first:
-                    stream.write(", ")
+            if first:
+                # Encode small caches one record at a time to avoid a second full copy.
+                stream.write("[")
+                for index, record in enumerate(records):
+                    if index:
+                        stream.write(", ")
+                    stream.write(json.dumps(record))
+            elif records:
+                stream.write(", ")
                 stream.write(json.dumps(records)[1:-1])
             stream.write("]")
-        if path.exists():
-            os.chmod(temporary, path.stat().st_mode & 0o777)
-        os.replace(temporary, path)
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
+        try:
+            mode = stat.S_IMODE(path.stat().st_mode)
+        except FileNotFoundError:
+            pass
+        else:
+            temporary.chmod(mode)
+        temporary.replace(path)
 
 
 def load_patch_cache(
