@@ -93,19 +93,13 @@ def find_segment_patches(
     ys, xs = np.nonzero(support)
     if len(ys) == 0:
         raise ValueError(f"{segment.supervision_mask} contains no nonzero voxels at scan scale")
-    stride = max(
-        1,
-        int(
-            round(
-                int(patch_size[1] * segment.data_config.patch_finding.overlap)
-                / scale_y
-            )
-        ),
-    )
+    overlap = segment.data_config.patch_finding.overlap
+    stride_y = max(1, int(round(int(patch_size[1] * overlap) / scale_y)))
+    stride_x = max(1, int(round(int(patch_size[2] * overlap) / scale_x)))
     # Mark occupied stride cells; np.argwhere keeps np.unique's row-major order.
-    occupied = np.zeros((support.shape[0] // stride + 1, support.shape[1] // stride + 1), bool)
-    occupied[ys // stride, xs // stride] = True
-    corners = np.argwhere(occupied) * stride
+    occupied = np.zeros((support.shape[0] // stride_y + 1, support.shape[1] // stride_x + 1), bool)
+    occupied[ys // stride_y, xs // stride_x] = True
+    corners = np.argwhere(occupied) * (stride_y, stride_x)
     scan_h = max(1, int(round(patch_size[1] / scale_y)))
     scan_w = max(1, int(round(patch_size[2] / scale_x)))
     training: list[Patch] = []
@@ -173,17 +167,11 @@ def find_segment_unlabeled_patches(
     ys, xs = np.nonzero(surface_slice)
     if len(ys) == 0:
         raise ValueError(f"{segment.image_volume} contains no nonzero projected data")
-    stride = max(
-        1,
-        int(
-            round(
-                int(patch_size[1] * segment.data_config.patch_finding.overlap)
-                / scale_y
-            )
-        ),
-    )
+    overlap = segment.data_config.patch_finding.overlap
+    stride_y = max(1, int(round(int(patch_size[1] * overlap) / scale_y)))
+    stride_x = max(1, int(round(int(patch_size[2] * overlap) / scale_x)))
     corners = np.unique(
-        np.stack([ys // stride * stride, xs // stride * stride], axis=1), axis=0
+        np.stack([ys // stride_y * stride_y, xs // stride_x * stride_x], axis=1), axis=0
     )
     scan_h = max(1, int(round(patch_size[1] / scale_y)))
     scan_w = max(1, int(round(patch_size[2] / scale_x)))
