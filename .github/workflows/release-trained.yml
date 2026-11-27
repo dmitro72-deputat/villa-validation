@@ -10,9 +10,9 @@ permissions:
 env:
   AGENTS_AGENT_MODE: '1'
   AGENTS_ALLOW_INSTALL: '1'
-  OMP_NUM_THREADS: '2'
-  MKL_NUM_THREADS: '2'
-  MALLOC_ARENA_MAX: '2'
+  OMP_NUM_THREADS: '1'
+  MKL_NUM_THREADS: '1'
+  MALLOC_ARENA_MAX: '1'
   OPENBLAS_NUM_THREADS: '1'
   WANDB_MODE: offline
   PYTHONDONTWRITEBYTECODE: '1'
@@ -126,6 +126,22 @@ jobs:
           free -m
           df -h "$VILLA_RELEASE_WORK"
           python -m pip -v install --no-build-isolation --no-deps "$VILLA_RELEASE_WORK/upstream/vc_reader"
+
+      - name: Add temporary swap headroom for the published CPU model
+        shell: bash
+        run: |
+          set -euo pipefail
+          free -m
+          swap_file="$RUNNER_TEMP/villa-release.swap"
+          if sudo fallocate -l 4G "$swap_file" &&
+             sudo chmod 600 "$swap_file" &&
+             sudo mkswap "$swap_file" &&
+             sudo swapon "$swap_file"; then
+            free -m
+          else
+            echo "::warning::Temporary swap could not be activated on this runner"
+            sudo rm -f "$swap_file"
+          fi
 
       - name: Run pristine upstream
         run: bash .github/validation/run_release_inference.sh upstream "$VILLA_RELEASE_WORK/upstream"
