@@ -1,0 +1,60 @@
+name: Villa independent validation - Windows
+on:
+  push:
+    branches: [audit/final-independent-validation]
+    paths: ['.github/workflows/final-validation-windows.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  writer:
+    runs-on: windows-2025
+    timeout-minutes: 35
+    env:
+      AGENTS_AGENT_MODE: '1'
+      AGENTS_ALLOW_INSTALL: '1'
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-python
+            mingw-w64-ucrt-x86_64-python-pip
+            mingw-w64-ucrt-x86_64-python-numpy
+            mingw-w64-ucrt-x86_64-python-pytest
+            mingw-w64-ucrt-x86_64-boost
+            mingw-w64-ucrt-x86_64-opencv
+            mingw-w64-ucrt-x86_64-curl
+            mingw-w64-ucrt-x86_64-sqlite3
+            mingw-w64-ucrt-x86_64-blosc
+            mingw-w64-ucrt-x86_64-blosc2
+            mingw-w64-ucrt-x86_64-concurrentqueue
+            mingw-w64-ucrt-x86_64-nlohmann-json
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-libtiff
+            mingw-w64-ucrt-x86_64-libpng
+            mingw-w64-ucrt-x86_64-libjpeg-turbo
+      - name: Build CPU vc_reader and run the Zarr writer suite
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          stage="$(mktemp -d)"
+          native_prefix="$(cygpath -m /ucrt64)"
+          # The upstream package's pkg-config file can contain unrelocated MSYS paths.
+          sed "s|/ucrt64/|$native_prefix/|g" /ucrt64/lib/pkgconfig/blosc2.pc > "$stage/blosc2.pc"
+          export PKG_CONFIG_PATH="$stage:/ucrt64/lib/pkgconfig"
+          python -m venv --system-site-packages "$stage/venv"
+          source "$stage/venv/bin/activate"
+          python -m pip install scikit-build-core nanobind
+          export CMAKE_ARGS="-DVC_READER_ENABLE_CUDA=OFF -DVC_READER_SHARED_READER=OFF"
+          python -m pip install --no-build-isolation --no-deps ./vc_reader
+          python -m pytest -q vc_reader/tests/test_zarr_writer.py
