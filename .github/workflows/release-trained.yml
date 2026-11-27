@@ -1,0 +1,172 @@
+name: Villa release readiness - exact trained checkpoint comparison
+on:
+  push:
+    branches: [audit/villa-release-readiness]
+    paths:
+      - '.github/workflows/release-trained.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  AGENTS_AGENT_MODE: '1'
+  AGENTS_ALLOW_INSTALL: '1'
+  OMP_NUM_THREADS: '2'
+  MKL_NUM_THREADS: '2'
+  MALLOC_ARENA_MAX: '2'
+  OPENBLAS_NUM_THREADS: '1'
+  WANDB_MODE: offline
+  PYTHONDONTWRITEBYTECODE: '1'
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 43
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 16
+          persist-credentials: false
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Retrieve and verify the pinned public checkpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/villa-release-check"
+          mkdir -p "$work"
+          printf 'VILLA_RELEASE_WORK=%s\n' "$work" >> "$GITHUB_ENV"
+          python .github/validation/download_release_weights.py "$work/release.pth"
+
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install scikit-build-core cmake ninja pybind11
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            nlohmann-json3-dev \
+            libboost-dev \
+            libconcurrentqueue-dev \
+            libcurl4-openssl-dev \
+            zlib1g-dev \
+            libsqlite3-dev \
+            libblosc-dev \
+            libzstd-dev \
+            liblz4-dev \
+            libtiff-dev \
+            libpng-dev \
+            libjpeg-dev \
+            pkg-config strace
+
+      - name: Build and install Blosc2
+        run: |
+          git clone --depth 1 --branch v2.15.2 \
+            https://github.com/Blosc/c-blosc2.git /tmp/c-blosc2
+          cmake -S /tmp/c-blosc2 -B /tmp/c-blosc2/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DBUILD_TESTS=OFF \
+            -DBUILD_BENCHMARKS=OFF \
+            -DBUILD_EXAMPLES=OFF
+          cmake --build /tmp/c-blosc2/build --parallel 2
+          sudo cmake --install /tmp/c-blosc2/build
+          sudo ldconfig
+          export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/usr/local/lib/x86_64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH}"
+          pkg-config --modversion blosc2
+          pkg-config --atleast-version=2.13 blosc2
+          echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install "./vesuvius[tests]"
+          python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install zarr scipy opencv-python-headless einops tqdm numba imagecodecs timm huggingface-hub fsspec aiohttp accelerate wandb pytorch-optimizer matplotlib scikit-image scikit-learn psutil click Pillow
+
+
+
+      - name: Verify the candidate refs and prepare the public CT patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$VILLA_RELEASE_WORK"
+          base=659e2fadb836d44063ed831d85517154ec852f11
+          occupancy=0e599b1900ced7767c85fab73253f8d121a76a97
+          pyramid=56d18e2f43543b51c97b0753ec7c4ebcbbd62c43
+          git fetch --no-tags --depth=3 origin \
+            "+refs/heads/perf/native-ink-occupancy-hardened:refs/remotes/origin/release-occupancy" \
+            "+refs/heads/perf/sparse-native-ink-pyramid-hardened:refs/remotes/origin/release-pyramid"
+          test "$(git rev-parse origin/release-occupancy)" = "$occupancy"
+          test "$(git rev-parse origin/release-pyramid)" = "$pyramid"
+          for pair in "upstream $base" "occupancy $occupancy" "pyramid $pyramid"; do
+            read -r variant revision <<< "$pair"
+            git worktree add --quiet --detach "$work/$variant" "$revision"
+            printf '%s %s\n' "$variant" "$(git -C "$work/$variant" rev-parse HEAD)"
+          done
+          source=vesuvius/src/vesuvius/ink_detection/inference/infer_full3d_tifxyz.py
+          diff -r --exclude=build --exclude=__pycache__ "$work/pyramid/vc_reader" "$PWD/vc_reader"
+          git show "$base:$source" > "$work/base.py"
+          git show "$occupancy:$source" > "$work/occ.py"
+          git diff --no-ext-diff "$base" "$pyramid" -- "$source" > "$work/pyramid.patch"
+          git -C "$work/occupancy" apply --check "$work/pyramid.patch"
+          git -C "$work/occupancy" apply "$work/pyramid.patch"
+          cmp "$work/occupancy/$source" "$PWD/$source"
+          cp "$work/occ.py" "$work/occupancy/$source"
+          python .github/validation/trained_fixture.py "$work"
+          rm "$work/release.pth"
+
+      - name: Run pristine upstream and the independent Occupancy revision
+        shell: bash
+        env:
+          CMAKE_ARGS: "-DVC_READER_ENABLE_CUDA=OFF"
+        run: |
+          set -euo pipefail
+          work="$VILLA_RELEASE_WORK"
+          python -m pip install --no-deps "$work/upstream/vc_reader"
+          bash .github/validation/run_release_inference.sh upstream "$work/upstream"
+          bash .github/validation/run_release_inference.sh occupancy "$work/occupancy"
+
+      - name: Run the independent Pyramid revision and the combined code
+        shell: bash
+        env:
+          CMAKE_ARGS: "-DVC_READER_ENABLE_CUDA=OFF"
+        run: |
+          set -euo pipefail
+          work="$VILLA_RELEASE_WORK"
+          python -m pip install --no-deps --force-reinstall "$work/pyramid/vc_reader"
+          bash .github/validation/run_release_inference.sh pyramid "$work/pyramid"
+          bash .github/validation/run_release_inference.sh combined "$PWD"
+
+      - name: Verify four identical nonempty six-level predictions
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$VILLA_RELEASE_WORK"
+          cd "$work/results"
+          for variant in upstream occupancy pyramid combined; do
+            test -f "$variant/prediction.zarr/0/308/100/160"
+            for level in 0 1 2 3 4 5; do
+              test -f "$variant/prediction.zarr/$level/.zarray"
+            done
+            diff -qr upstream/prediction.zarr "$variant/prediction.zarr"
+            (
+              cd "$variant/prediction.zarr"
+              find . -type f -print0 | sort -z | xargs -0 sha256sum > "../../$variant.sha256"
+            )
+            cmp upstream.sha256 "$variant.sha256"
+            sha256sum "$variant.sha256"
+          done
+          echo "PASS: upstream, exact Occupancy, exact Pyramid, and combined predictions match byte for byte."
+          cat combined.sha256
+          {
+            echo '### Exact release revisions compared on Paris 4'
+            echo
+            echo 'All four six-level OME-Zarr predictions matched byte for byte.'
+            echo
+            echo '```text'
+            sha256sum upstream.sha256 occupancy.sha256 pyramid.sha256 combined.sha256
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
