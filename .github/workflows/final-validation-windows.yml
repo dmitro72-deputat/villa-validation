@@ -43,7 +43,7 @@ jobs:
             mingw-w64-ucrt-x86_64-libtiff
             mingw-w64-ucrt-x86_64-libpng
             mingw-w64-ucrt-x86_64-libjpeg-turbo
-      - name: Build CPU vc_reader and run the Zarr writer suite
+      - name: Build CPU vc_reader and test sparse pyramids
         shell: msys2 {0}
         run: |
           set -euo pipefail
@@ -57,4 +57,4 @@ jobs:
           python -m pip install scikit-build-core nanobind
           export CMAKE_ARGS="-DVC_READER_ENABLE_CUDA=OFF -DVC_READER_SHARED_READER=OFF"
           python -m pip install --no-build-isolation --no-deps ./vc_reader
-          python -m pytest -q vc_reader/tests/test_zarr_writer.py
+          python .github/validation/windows_sparse_pyramid.py
