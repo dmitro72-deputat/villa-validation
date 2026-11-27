@@ -714,9 +714,13 @@ def create_output_zarr(
 
 
 def build_downsample_levels(
-    arrays, *, level0_written_chunks: set[ChunkId], workers: int = 1
+    arrays, *, level0_written_chunks: set[ChunkId], workers: int = 1, fresh_output: bool = False
 ) -> None:
-    """Write the lower pyramid levels over the box of the written level-0 chunks."""
+    """Write the lower pyramid levels for the covered level-0 region.
+
+    For a fresh zero-filled prediction, all level-0 writes must be listed.
+    Otherwise rebuild the entire covered box, including any stale chunks.
+    """
 
     if not level0_written_chunks:
         return
@@ -727,10 +731,27 @@ def build_downsample_levels(
     starts = [min(start[axis] for start, _ in bounds) for axis in range(3)]
     stops = [max(stop[axis] for _, stop in bounds) for axis in range(3)]
     root = Path(arrays[0].path).parent
-    for level in range(1, len(arrays)):
+    for level, array in enumerate(arrays[1:], start=1):
+        chunks = tuple(array.chunks)
+        if fresh_output:
+            # A level-L voxel reduces a block of 2**L level-0 voxels per axis.
+            # Projections of the written source chunks contain every voxel that
+            # can differ from zero, including partial blocks at volume edges.
+            factor = 1 << level
+            shape = tuple(array.shape)
+            affected = set()
+            for source_start, source_stop in bounds:
+                projected_start = tuple(value // factor for value in source_start)
+                projected_stop = tuple(-(-value // factor) for value in source_stop)
+                for chunk in chunks_overlapping_box(
+                    projected_start, projected_stop,
+                    chunk_shape_zyx=chunks, array_shape_zyx=shape,
+                ):
+                    affected.add((chunk.z, chunk.y, chunk.x))
+            write_pyramid_level(root, level, threads=max(1, workers), chunk_indices=affected)
+            continue
         starts = [value // 2 for value in starts]
         stops = [(value + 1) // 2 for value in stops]
-        chunks = arrays[level].chunks
         write_pyramid_level(
             root,
             level,
@@ -1110,6 +1131,7 @@ def run_command(args) -> int:
         arrays,
         level0_written_chunks=set(plan.target_chunks),
         workers=args.downsample_workers,
+        fresh_output=True,
     )
     return 0
 
