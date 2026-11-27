@@ -1,0 +1,115 @@
+name: Villa hardening - public trained checkpoint
+on:
+  push:
+    branches: [audit/villa-hardening]
+    paths:
+      - '.github/workflows/hardening-trained.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  AGENTS_AGENT_MODE: '1'
+  AGENTS_ALLOW_INSTALL: '1'
+  OMP_NUM_THREADS: '2'
+  MKL_NUM_THREADS: '2'
+  MALLOC_ARENA_MAX: '2'
+  OPENBLAS_NUM_THREADS: '1'
+  WANDB_MODE: offline
+  PYTHONDONTWRITEBYTECODE: '1'
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 38
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 8
+          persist-credentials: false
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install scikit-build-core cmake ninja pybind11
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            nlohmann-json3-dev \
+            libboost-dev \
+            libconcurrentqueue-dev \
+            libcurl4-openssl-dev \
+            zlib1g-dev \
+            libsqlite3-dev \
+            libblosc-dev \
+            libzstd-dev \
+            liblz4-dev \
+            libtiff-dev \
+            libpng-dev \
+            libjpeg-dev \
+            pkg-config strace
+
+      - name: Build and install Blosc2
+        run: |
+          git clone --depth 1 --branch v2.15.2 \
+            https://github.com/Blosc/c-blosc2.git /tmp/c-blosc2
+          cmake -S /tmp/c-blosc2 -B /tmp/c-blosc2/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DBUILD_TESTS=OFF \
+            -DBUILD_BENCHMARKS=OFF \
+            -DBUILD_EXAMPLES=OFF
+          cmake --build /tmp/c-blosc2/build --parallel 2
+          sudo cmake --install /tmp/c-blosc2/build
+          sudo ldconfig
+          export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/usr/local/lib/x86_64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH}"
+          pkg-config --modversion blosc2
+          pkg-config --atleast-version=2.13 blosc2
+          echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
+
+      - name: Build VC Reader
+        env:
+          CMAKE_ARGS: "-DVC_READER_ENABLE_CUDA=OFF"
+        run: python -m pip install ./vc_reader pytest
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install "./vesuvius[tests]"
+          python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install zarr scipy opencv-python-headless einops tqdm numba imagecodecs timm huggingface-hub fsspec aiohttp accelerate wandb pytorch-optimizer matplotlib scikit-image scikit-learn psutil click Pillow
+
+
+
+      - name: Compare one published-model CPU patch on real Paris 4 CT
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          url=https://huggingface.co/scrollprize/ink_3d_dino_guided/resolve/73a79525466037432191284dfa237baf830c49ec/ckpt_78k_fullsup.pth
+          curl --fail --silent --show-error --location --retry 2 --max-time 480 "$url" -o "$work/release.pth"
+          printf '5a148c2c1bb730bfa683f2b3e3cdfc2000424003605e42300b527ff90118b303  %s\n' "$work/release.pth" | sha256sum -c -
+          python .github/validation/trained_fixture.py "$work"
+          rm "$work/release.pth"
+          source=vesuvius/src/vesuvius/ink_detection/inference/infer_full3d_tifxyz.py
+          cp "$source" "$work/hardened.py"
+          trap 'cp "$work/hardened.py" "$source"' EXIT
+          git show "659e2fadb836d44063ed831d85517154ec852f11:$source" > "$work/upstream.py"
+          export PYTHONPATH="$PWD/vesuvius/src"
+          for variant in upstream hardened; do
+            cp "$work/$variant.py" "$source"
+            mkdir -p "$work/$variant"
+            /usr/bin/time -f "$variant %e s %M KiB RSS" timeout 9m \
+              python -m vesuvius.ink_detection.inference.infer_full3d_tifxyz \
+                "$work/mesh" "$work/ema.pth" "$work/$variant/prediction.zarr" \
+                --device cpu --resolution 0 --overlap 0 --chunk-halo 0 --write-region occupied \
+                --no-compile --batch-size 1 --num-workers 0 --downsample-workers 1 \
+                2>&1 | tee "$work/$variant.log"
+            grep -E 'target_chunks=1 inference_patches=1' "$work/$variant.log"
+          done
+          diff -qr "$work/upstream/prediction.zarr" "$work/hardened/prediction.zarr"
+          cd "$work/hardened/prediction.zarr"
+          find . -type f -print0 | sort -z | xargs -0 sha256sum
