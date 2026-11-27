@@ -230,6 +230,28 @@ def chunk_grid_shape(
     )
 
 
+def _tifxyz_occupied_chunks_indexed(
+    x: np.ndarray,
+    y: np.ndarray,
+    z: np.ndarray,
+    valid: np.ndarray,
+    array_shape_zyx: tuple[int, int, int],
+    chunk_shape_zyx: tuple[int, int, int],
+) -> set[ChunkId]:
+    """Preserve NumPy advanced indexing for inputs outside the buffered path."""
+    if not np.any(valid):
+        raise ValueError("No finite non-negative tifxyz points were found")
+    indices_zyx = np.stack(
+        [np.floor(z[valid]), np.floor(y[valid]), np.floor(x[valid])], axis=1
+    ).astype(np.int64, copy=False)
+    shape = np.asarray(array_shape_zyx, dtype=np.int64)
+    in_bounds = ((indices_zyx >= 0) & (indices_zyx < shape)).all(axis=1)
+    if not np.any(in_bounds):
+        raise ValueError(f"No tifxyz points fall inside input volume shape {array_shape_zyx}")
+    chunk_indices = indices_zyx[in_bounds] // np.asarray(chunk_shape_zyx)
+    return {ChunkId(*map(int, row)) for row in np.unique(chunk_indices, axis=0)}
+
+
 def tifxyz_occupied_chunks(
     *,
     x: np.ndarray,
@@ -241,17 +263,48 @@ def tifxyz_occupied_chunks(
 ) -> set[ChunkId]:
     """Map finite, in-bounds tifxyz positions to occupied ZYX chunks."""
 
-    if not np.any(valid):
-        raise ValueError("No finite non-negative tifxyz points were found")
-    indices_zyx = np.stack(
-        [np.floor(z[valid]), np.floor(y[valid]), np.floor(x[valid])], axis=1
-    ).astype(np.int64, copy=False)
+    if (
+        not x.shape == y.shape == z.shape == valid.shape
+        or valid.dtype != np.bool_
+        or any(axis.dtype.hasobject for axis in (x, y, z))
+    ):
+        # nditer broadcasts shapes, does not implement integer-mask indexing,
+        # and cannot buffer references with the numeric path's flags.
+        return _tifxyz_occupied_chunks_indexed(x, y, z, valid, array_shape_zyx, chunk_shape_zyx)
+
     shape = np.asarray(array_shape_zyx, dtype=np.int64)
-    in_bounds = ((indices_zyx >= 0) & (indices_zyx < shape)).all(axis=1)
-    if not np.any(in_bounds):
+    chunk_shape = np.asarray(chunk_shape_zyx, dtype=np.int64)
+    occupied = set()
+    saw_valid = False
+    # The coordinate channels are strided views of the XYZ grid. Buffer only a
+    # block at a time so neither gathering vertices nor sorting scales in RAM
+    # with the number of vertices on the surface.
+    with np.nditer(
+        (z, y, x, valid),
+        flags=["external_loop", "buffered", "zerosize_ok"],
+        order="C",
+        buffersize=262_144,
+    ) as blocks:
+        for z_block, y_block, x_block, valid_block in blocks:
+            if not valid_block.any():
+                continue
+            saw_valid = True
+            indices = np.stack(
+                [np.floor(axis[valid_block]) for axis in (z_block, y_block, x_block)],
+                axis=1,
+            ).astype(np.int64, copy=False)
+            in_bounds = ((indices >= 0) & (indices < shape)).all(axis=1)
+            chunks = indices[in_bounds] // chunk_shape
+            # Sort the integer columns directly, then keep one row per chunk.
+            chunks = chunks[np.lexsort(chunks.T)]
+            first = np.ones(len(chunks), dtype=bool)
+            first[1:] = (chunks[1:] != chunks[:-1]).any(axis=1)
+            occupied.update(ChunkId(*map(int, row)) for row in chunks[first])
+    if not saw_valid:
+        raise ValueError("No finite non-negative tifxyz points were found")
+    if not occupied:
         raise ValueError(f"No tifxyz points fall inside input volume shape {array_shape_zyx}")
-    chunk_indices = indices_zyx[in_bounds] // np.asarray(chunk_shape_zyx)
-    return {ChunkId(*(int(value) for value in row)) for row in np.unique(chunk_indices, axis=0)}
+    return occupied
 
 
 def expand_chunks(
