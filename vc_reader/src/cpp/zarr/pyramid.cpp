@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <thread>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -182,8 +183,10 @@ void createPyramidLevels(const fs::path& root, const PyramidOptions& options, bo
     createPyramidLevels(root, level0, options);
 }
 
-void writePyramidLevel(const fs::path& root, int level, const PyramidOptions& options, const std::optional<ChunkRange>& range,
-                       const std::function<void(std::size_t, std::size_t)>& progress)
+static void writePyramidLevelImpl(const fs::path& root, int level, const PyramidOptions& options,
+                                  const std::optional<ChunkRange>& range,
+                                  const std::function<void(std::size_t, std::size_t)>& progress,
+                                  std::optional<std::vector<Index>> chunkIndices)
 {
     checkFactors(options);
     if (level < 1)
@@ -204,16 +207,31 @@ void writePyramidLevel(const fs::path& root, int level, const PyramidOptions& op
         end[axis] = range ? std::min(range->end[axis], grid) : grid;
         begin[axis] = range ? std::min(range->begin[axis], end[axis]) : 0;
     }
-    const auto count = std::size_t((end[0] - begin[0]) * (end[1] - begin[1]) * (end[2] - begin[2]));
+    if (chunkIndices) {
+        for (const auto& chunk : *chunkIndices) {
+            if (chunk.size() != 3)
+                throw std::invalid_argument("pyramid chunk index must contain three coordinates");
+            for (std::size_t axis = 0; axis < 3; ++axis) {
+                if (chunk[axis] < 0 || chunk[axis] >= end[axis])
+                    throw std::invalid_argument("pyramid chunk index outside the output grid");
+            }
+        }
+        std::sort(chunkIndices->begin(), chunkIndices->end());
+        chunkIndices->erase(std::unique(chunkIndices->begin(), chunkIndices->end()), chunkIndices->end());
+    }
+    const auto rows = end[1] - begin[1], columns = end[2] - begin[2];
+    const auto count = chunkIndices ? chunkIndices->size() : std::size_t((end[0] - begin[0]) * rows * columns);
+    if (count == 0)
+        return;
     const auto itemsize = meta.itemsize();
     std::atomic<std::size_t> done{0};
 
     ThreadPool pool(options.threads ? options.threads : std::max(1u, std::thread::hardware_concurrency()));
     pool.parallel_for(count, [&](std::size_t index) {
-        const auto rows = end[1] - begin[1], columns = end[2] - begin[2];
-        const Index chunk{begin[0] + std::int64_t(index) / (rows * columns),
-                          begin[1] + std::int64_t(index) / columns % rows,
-                          begin[2] + std::int64_t(index) % columns};
+        const Index chunk = chunkIndices ? (*chunkIndices)[index] :
+            Index{begin[0] + std::int64_t(index) / (rows * columns),
+                  begin[1] + std::int64_t(index) / columns % rows,
+                  begin[2] + std::int64_t(index) % columns};
         // The source voxels under this output chunk.
         Index start(3), srcSize(3), dstSize(3);
         for (std::size_t axis = 0; axis < 3; ++axis) {
@@ -239,6 +257,19 @@ void writePyramidLevel(const fs::path& root, int level, const PyramidOptions& op
         if (progress)
             progress(++done, count);
     });
+}
+
+void writePyramidLevel(const fs::path& root, int level, const PyramidOptions& options, const std::optional<ChunkRange>& range,
+                       const std::function<void(std::size_t, std::size_t)>& progress)
+{
+    writePyramidLevelImpl(root, level, options, range, progress, std::nullopt);
+}
+
+void writePyramidLevelChunks(const fs::path& root, int level, const PyramidOptions& options,
+                             std::vector<Index> chunkIndices,
+                             const std::function<void(std::size_t, std::size_t)>& progress)
+{
+    writePyramidLevelImpl(root, level, options, std::nullopt, progress, std::move(chunkIndices));
 }
 
 void writePyramid(const fs::path& root, const PyramidOptions& options, bool overwrite)

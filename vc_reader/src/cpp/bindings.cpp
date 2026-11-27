@@ -896,14 +896,21 @@ NB_MODULE(_reader, m)
     }, "root"_a, "levels"_a, "factors"_a, "overwrite"_a);
     m.def("write_pyramid_level", [pyramidOptions](const std::string& root, int level, const std::array<int, 3>& factors,
                                                   const std::string& reduction, std::size_t threads,
-                                                  const std::optional<vcr::Index>& begin, const std::optional<vcr::Index>& end) {
+                                                  const std::optional<vcr::Index>& begin, const std::optional<vcr::Index>& end,
+                                                  std::optional<std::vector<vcr::Index>> chunkIndices) {
         const auto options = pyramidOptions(level, factors, reduction, threads);
         std::optional<vcr::zarr::ChunkRange> range;
         if (begin && end)
             range = vcr::zarr::ChunkRange{*begin, *end};
+        if (range && chunkIndices)
+            throw std::invalid_argument("specify either a chunk range or chunk indices");
         nb::gil_scoped_release release;
-        vcr::zarr::writePyramidLevel(vcr::utf8Path(root), level, options, range);
-    }, "root"_a, "level"_a, "factors"_a, "reduction"_a, "threads"_a, "begin"_a.none(), "end"_a.none());
+        if (chunkIndices)
+            vcr::zarr::writePyramidLevelChunks(vcr::utf8Path(root), level, options, std::move(*chunkIndices));
+        else
+            vcr::zarr::writePyramidLevel(vcr::utf8Path(root), level, options, range);
+    }, "root"_a, "level"_a, "factors"_a, "reduction"_a, "threads"_a, "begin"_a.none(), "end"_a.none(),
+       "chunk_indices"_a.none() = nb::none());
     m.def("write_pyramid", [pyramidOptions](const std::string& root, int levels, const std::array<int, 3>& factors,
                                             const std::string& reduction, std::size_t threads, bool overwrite) {
         const auto options = pyramidOptions(levels, factors, reduction, threads);

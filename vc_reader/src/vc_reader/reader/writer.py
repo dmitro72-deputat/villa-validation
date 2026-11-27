@@ -7,7 +7,7 @@ default) for AWS credentials from the environment; see :mod:`vc_reader.reader.au
 from __future__ import annotations
 
 import os
-from collections.abc import MutableMapping
+from collections.abc import Iterable, MutableMapping
 from typing import Any, Iterator, Sequence
 
 import numpy as np
@@ -378,14 +378,19 @@ def create_pyramid_levels(root: str | os.PathLike[str], levels: int, *, factors:
 
 def write_pyramid_level(root: str | os.PathLike[str], level: int, *, factors: Sequence[int] = (2, 2, 2),
                         reduction: str = "mean", threads: int = 0,
-                        chunk_range: tuple[Sequence[int], Sequence[int]] | None = None) -> None:
+                        chunk_range: tuple[Sequence[int], Sequence[int]] | None = None,
+                        chunk_indices: Iterable[Sequence[int]] | None = None) -> None:
     """Write local ``root/level`` from the level below. ``reduction``: ``mean`` (uint8, uint16, float32;
     integers round to nearest, ties to even), ``nearest`` (a block's first voxel, any dtype) or ``mode``
     (most common nonzero value, smallest on a tie; integers). Chunks entirely fill are not stored. ``chunk_range`` is
     ``(begin, end)`` in output chunks, so separate processes can write disjoint ranges.
+    Alternatively, ``chunk_indices`` selects individual ZYX output chunks. Duplicates
+    are written once. An empty iterable writes nothing.
     """
     begin, end = (None, None) if chunk_range is None else ([int(n) for n in chunk_range[0]], [int(n) for n in chunk_range[1]])
-    _reader.write_pyramid_level(os.fspath(root), int(level), [int(f) for f in factors], reduction, int(threads), begin, end)
+    indices = None if chunk_indices is None else [[int(n) for n in chunk] for chunk in chunk_indices]
+    _reader.write_pyramid_level(os.fspath(root), int(level), [int(f) for f in factors],
+                                reduction, int(threads), begin, end, indices)
 
 
 def write_pyramid(root: str | os.PathLike[str], levels: int, *, factors: Sequence[int] = (2, 2, 2),
