@@ -1,0 +1,173 @@
+name: Villa hardening - Linux
+on:
+  push:
+    branches: [audit/villa-hardening]
+    paths:
+      - '.github/workflows/hardening-linux.yml'
+      - '.github/validation/*.py'
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  AGENTS_AGENT_MODE: '1'
+  AGENTS_ALLOW_INSTALL: '1'
+  OMP_NUM_THREADS: '1'
+  MKL_NUM_THREADS: '1'
+  OPENBLAS_NUM_THREADS: '1'
+  WANDB_MODE: offline
+  PYTHONDONTWRITEBYTECODE: '1'
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 38
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 8
+          persist-credentials: false
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install scikit-build-core cmake ninja pybind11
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            nlohmann-json3-dev \
+            libboost-dev \
+            libconcurrentqueue-dev \
+            libcurl4-openssl-dev \
+            zlib1g-dev \
+            libsqlite3-dev \
+            libblosc-dev \
+            libzstd-dev \
+            liblz4-dev \
+            libtiff-dev \
+            libpng-dev \
+            libjpeg-dev \
+            pkg-config strace
+
+      - name: Build and install Blosc2
+        run: |
+          git clone --depth 1 --branch v2.15.2 \
+            https://github.com/Blosc/c-blosc2.git /tmp/c-blosc2
+          cmake -S /tmp/c-blosc2 -B /tmp/c-blosc2/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DBUILD_TESTS=OFF \
+            -DBUILD_BENCHMARKS=OFF \
+            -DBUILD_EXAMPLES=OFF
+          cmake --build /tmp/c-blosc2/build --parallel 2
+          sudo cmake --install /tmp/c-blosc2/build
+          sudo ldconfig
+          export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/usr/local/lib/x86_64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH}"
+          pkg-config --modversion blosc2
+          pkg-config --atleast-version=2.13 blosc2
+          echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
+
+      - name: Build VC Reader
+        env:
+          CMAKE_ARGS: "-DVC_READER_ENABLE_CUDA=OFF"
+        run: python -m pip install ./vc_reader pytest
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install "./vesuvius[tests]"
+          python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install zarr scipy opencv-python-headless einops tqdm numba imagecodecs timm huggingface-hub fsspec aiohttp accelerate wandb pytorch-optimizer matplotlib scikit-image scikit-learn psutil click Pillow
+
+
+
+      - name: Check the old shared-library ABI
+        run: bash .github/validation/check_abi.sh
+
+      - name: Check occupancy compatibility and real planning performance
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          source=vesuvius/src/vesuvius/ink_detection/inference/infer_full3d_tifxyz.py
+          script=.github/validation/bench_occupancy.py
+          git show "659e2fadb836d44063ed831d85517154ec852f11:$source" > "$work/upstream.py"
+          python .github/validation/occupancy_probes.py
+          base=https://vesuvius-challenge-open-data.s3.us-east-1.amazonaws.com/PHercParis4
+          mesh="$base/segments/20260604223808-20231210121321_v8/mesh/20260604223808-on-20260411134726-2.4um.tifxyz"
+          volume="$base/volumes/20260411134726-2.400um-0.2m-78keV-masked.zarr"
+          for f in x.tif y.tif z.tif; do
+            curl --fail --silent --show-error --retry 3 "$mesh/$f" -o "$work/$f"
+          done
+          curl --fail --silent --show-error --retry 3 "$volume/2/.zarray" -o "$work/.zarray"
+          for n in 1 2 3; do
+            order=(upstream hardened)
+            if [[ "$n" == 2 ]]; then order=(hardened upstream); fi
+            for variant in "${order[@]}"; do
+              path="$source"
+              if [[ "$variant" == upstream ]]; then path="$work/upstream.py"; fi
+              printf 'occupancy %s trial %s ' "$variant" "$n"
+              python "$script" "$path" "$work" "$work/.zarray" --coordinate-scale 0.25 --plan | tee "$work/$variant.$n.json"
+            done
+            test "$(jq -r .signature "$work/upstream.$n.json")" = "$(jq -r .signature "$work/hardened.$n.json")"
+          done
+
+      - name: Benchmark multiple densities and the published sparse prediction
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          source=vesuvius/src/vesuvius/ink_detection/inference/infer_full3d_tifxyz.py
+          script=.github/validation/density_matrix.py
+          real=.github/validation/bench_pyramid.py
+          git show "659e2fadb836d44063ed831d85517154ec852f11:$source" > "$work/upstream.py"
+          declare -A path=([upstream]="$work/upstream.py" [hardened]="$source")
+          for layout in full half quarter-distributed quarter-clustered corners published; do
+            if [[ "$layout" == published ]]; then
+              python "$real" prepare "$source" "$work/template"
+            else
+              python "$script" prepare "$source" "$work/template" "$layout"
+            fi
+            for n in 1 2 3; do
+              order=(upstream hardened)
+              if [[ "$n" == 2 ]]; then order=(hardened upstream); fi
+              for variant in "${order[@]}"; do
+                cp -r "$work/template" "$work/$variant"
+                printf 'density %s %s trial %s ' "$layout" "$variant" "$n"
+                if [[ "$layout" == published ]]; then
+                  python "$real" run "${path[$variant]}" "$work/$variant"
+                else
+                  python "$script" run "${path[$variant]}" "$work/$variant" "$layout"
+                fi
+              done
+              diff -qr "$work/upstream" "$work/hardened"
+              rm -r "$work/upstream" "$work/hardened"
+            done
+            rm -r "$work/template"
+          done
+
+      - name: Repeat the full CPU pipeline and verify the prior pristine manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          export PYTHONPATH="$PWD/vesuvius/src"
+          script=.github/validation/cpu_fixture.py
+          python "$script" prepare-ct "$work/fixture"
+          python -m vesuvius.ink_detection.inference.infer_full3d_tifxyz \
+            "$work/fixture/mesh" "$work/fixture/fixture.pth" "$work/prediction.zarr" \
+            --device cpu --resolution 0 --overlap 0 --chunk-halo 0 --write-region occupied \
+            --no-compile --batch-size 2 --num-workers 0 --downsample-workers 2
+          python "$script" inspect "$work/prediction.zarr" | tee "$work/manifest.txt"
+          (
+            cd "$work"
+            printf '31e9afc534ff75459cdc81aeff1db22a4cb4ffa8c9e135cfc0884622b5b3520d  manifest.txt\n' | sha256sum -c -
+          )
+
+      - name: Run native ink and Zarr suites
+        run: |
+          python -m pytest -q -m 'not slow and not network' vesuvius/tests/ink_detection
+          python -m pytest -q vc_reader/tests/test_zarr_writer.py
