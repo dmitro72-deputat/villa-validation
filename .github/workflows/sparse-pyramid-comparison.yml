@@ -27,8 +27,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: candidate
-          ref: 60c2431b2648434c0b7122b8953ee10b5ea78a83
-          fetch-depth: 2
+          ref: 83c219b86c8f408da7db3033364e04fa6a445331
+          fetch-depth: 3
           persist-credentials: false
 
       - name: Setup Python
@@ -89,7 +89,7 @@ jobs:
           path=vesuvius/src/vesuvius/ink_detection/inference/infer_full3d_tifxyz.py
           script=.github/validation/sparse_pyramid_benchmark.py
           work="$(mktemp -d)"
-          git -C candidate show "HEAD^:$path" > "$work/baseline.py"
+          git -C candidate show "659e2fadb836d44063ed831d85517154ec852f11:$path" > "$work/baseline.py"
           declare -A source=([before]="$work/baseline.py" [after]="candidate/$path")
           python "$script" prepare "${source[after]}" "$work/template"
           for n in 1 2 3; do
