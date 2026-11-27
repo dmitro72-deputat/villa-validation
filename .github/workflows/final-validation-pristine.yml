@@ -1,0 +1,104 @@
+name: Villa independent validation - pristine upstream
+on:
+  push:
+    branches: [audit/final-independent-validation]
+    paths: ['.github/workflows/final-validation-pristine.yml']
+permissions:
+  contents: read
+env:
+  AGENTS_AGENT_MODE: '1'
+  AGENTS_ALLOW_INSTALL: '1'
+  OMP_NUM_THREADS: '1'
+  MKL_NUM_THREADS: '1'
+  OPENBLAS_NUM_THREADS: '1'
+  WANDB_MODE: offline
+  PYTHONDONTWRITEBYTECODE: '1'
+jobs:
+  pristine:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          path: upstream
+          ref: 659e2fadb836d44063ed831d85517154ec852f11
+          persist-credentials: false
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install scikit-build-core cmake ninja pybind11
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            nlohmann-json3-dev \
+            libboost-dev \
+            libconcurrentqueue-dev \
+            libcurl4-openssl-dev \
+            zlib1g-dev \
+            libsqlite3-dev \
+            libblosc-dev \
+            libzstd-dev \
+            liblz4-dev \
+            libtiff-dev \
+            libpng-dev \
+            libjpeg-dev \
+            pkg-config strace
+
+      - name: Build and install Blosc2
+        run: |
+          git clone --depth 1 --branch v2.15.2 \
+            https://github.com/Blosc/c-blosc2.git /tmp/c-blosc2
+          cmake -S /tmp/c-blosc2 -B /tmp/c-blosc2/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DBUILD_TESTS=OFF \
+            -DBUILD_BENCHMARKS=OFF \
+            -DBUILD_EXAMPLES=OFF
+          cmake --build /tmp/c-blosc2/build --parallel 2
+          sudo cmake --install /tmp/c-blosc2/build
+          sudo ldconfig
+          export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/usr/local/lib/x86_64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH}"
+          pkg-config --modversion blosc2
+          pkg-config --atleast-version=2.13 blosc2
+          echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
+
+      - name: Build VC Reader
+        env:
+          CMAKE_ARGS: "-DVC_READER_ENABLE_CUDA=OFF"
+        run: python -m pip install ./upstream/vc_reader pytest
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install "./upstream/vesuvius[tests]"
+          python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install zarr scipy opencv-python-headless einops tqdm numba imagecodecs timm huggingface-hub fsspec aiohttp accelerate wandb pytorch-optimizer matplotlib scikit-image scikit-learn psutil click Pillow
+
+
+      - name: Verify the exact manifest with a pristine vc_reader build
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          script=.github/validation/final_independent_validation.py
+          export PYTHONPATH="$PWD/upstream/vesuvius/src"
+          test "$(git -C upstream rev-parse HEAD)" = 659e2fadb836d44063ed831d85517154ec852f11
+          python "$script" prepare-ct "$work/fixture"
+          python -m vesuvius.ink_detection.inference.infer_full3d_tifxyz \
+            "$work/fixture/mesh" "$work/fixture/fixture.pth" "$work/prediction.zarr" \
+            --device cpu --resolution 0 --overlap 0 --chunk-halo 0 --write-region occupied \
+            --no-compile --batch-size 2 --num-workers 0 --downsample-workers 2
+          python "$script" inspect "$work/prediction.zarr" | tee "$work/manifest.txt"
+          (
+            cd "$work"
+            printf '31e9afc534ff75459cdc81aeff1db22a4cb4ffa8c9e135cfc0884622b5b3520d  manifest.txt\n' | sha256sum -c -
+          )
