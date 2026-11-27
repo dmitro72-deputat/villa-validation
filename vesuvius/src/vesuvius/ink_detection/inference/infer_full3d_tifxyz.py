@@ -714,32 +714,55 @@ def create_output_zarr(
 
 
 def build_downsample_levels(
-    arrays, *, level0_written_chunks: set[ChunkId], workers: int = 1
+    arrays, *, level0_written_chunks: set[ChunkId], workers: int = 1, fresh_output: bool = False
 ) -> None:
-    """Write the lower pyramid levels over the box of the written level-0 chunks."""
+    """Write the lower pyramid levels for the covered level-0 region.
+
+    For a fresh zero-filled prediction, all level-0 writes must be listed.
+    Otherwise rebuild the entire covered box, including any stale chunks.
+    """
 
     if not level0_written_chunks:
         return
-    bounds = [
-        chunk_bounds(chunk, chunk_shape_zyx=tuple(arrays[0].chunks), array_shape_zyx=tuple(arrays[0].shape))
-        for chunk in level0_written_chunks
-    ]
-    starts = [min(start[axis] for start, _ in bounds) for axis in range(3)]
-    stops = [max(stop[axis] for _, stop in bounds) for axis in range(3)]
+    source_shape = tuple(arrays[0].shape)
+    source_chunks = tuple(arrays[0].chunks)
+    indices = np.fromiter(
+        ((chunk.z, chunk.y, chunk.x) for chunk in level0_written_chunks),
+        dtype=np.dtype((np.int64, 3)), count=len(level0_written_chunks),
+    )
+    lower = tuple(map(int, indices.min(axis=0)))
+    upper = tuple(map(int, indices.max(axis=0)))
+    starts = [lo * size for lo, size in zip(lower, source_chunks)]
+    stops = [min((hi + 1) * size, length) for hi, size, length in zip(upper, source_chunks, source_shape)]
+    # At native levels, chunk edges remain aligned: every input chunk maps
+    # to exactly one chunk one level up. Unusual layouts use the box writer.
+    track_coverage = (
+        fresh_output
+        and len(indices) < math.prod(hi - lo + 1 for lo, hi in zip(lower, upper))
+        and all(0 <= start < stop for start, stop in zip(starts, stops))
+        and all(hi * size < length for hi, size, length in zip(upper, source_chunks, source_shape))
+        and all(
+            tuple(array.shape) == shape
+            and tuple(array.chunks) == tuple(min(size, length) for size, length in zip(source_chunks, shape))
+            for array, shape in zip(arrays, pyramid_shapes(source_shape, len(arrays)))
+        )
+    )
     root = Path(arrays[0].path).parent
-    for level in range(1, len(arrays)):
+    threads = max(1, workers)
+    for level, array in enumerate(arrays[1:], start=1):
+        chunks = tuple(array.chunks)
         starts = [value // 2 for value in starts]
         stops = [(value + 1) // 2 for value in stops]
-        chunks = arrays[level].chunks
-        write_pyramid_level(
-            root,
-            level,
-            threads=max(1, workers),
-            chunk_range=(
-                [start // size for start, size in zip(starts, chunks)],
-                [-(-stop // size) for stop, size in zip(stops, chunks)],
-            ),
-        )
+        begin = [start // size for start, size in zip(starts, chunks)]
+        end = [-(-stop // size) for stop, size in zip(stops, chunks)]
+        if track_coverage:
+            indices = np.unique(indices // 2, axis=0)
+            if len(indices) < math.prod(hi - lo for lo, hi in zip(begin, end)):
+                write_pyramid_level(root, level, threads=threads, chunk_indices=indices)
+                continue
+            # Projecting a complete box keeps it complete at every coarser level.
+            track_coverage = False
+        write_pyramid_level(root, level, threads=threads, chunk_range=(begin, end))
 
 
 class NativePatchDataset(Dataset):
@@ -1110,6 +1133,7 @@ def run_command(args) -> int:
         arrays,
         level0_written_chunks=set(plan.target_chunks),
         workers=args.downsample_workers,
+        fresh_output=True,
     )
     return 0
 

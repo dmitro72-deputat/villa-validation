@@ -207,6 +207,12 @@ void writePyramidLevel(const std::filesystem::path& root, int level, const Pyram
                        const std::optional<ChunkRange>& range = std::nullopt,
                        const std::function<void(std::size_t, std::size_t)>& progress = {});
 
+// Writes individual output chunks. Repeated indices are written once, and an
+// empty selection writes nothing.
+void writePyramidLevelChunks(const std::filesystem::path& root, int level, const PyramidOptions& options,
+                             std::vector<Index> chunkIndices,
+                             const std::function<void(std::size_t, std::size_t)>& progress = {});
+
 // Creates and writes every level above the level 0 stored at <root>/0.
 void writePyramid(const std::filesystem::path& root, const PyramidOptions& options, bool overwrite = false);
 

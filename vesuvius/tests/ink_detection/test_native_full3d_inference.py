@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 from pathlib import Path
 import pickle
@@ -565,6 +566,54 @@ def test_output_reject_overwrite_and_coherent_rerun(tmp_path):
     )
     assert not np.asarray(second[0]).any()
     assert len(list(open_group(output).array_keys())) == 6
+
+
+def test_sparse_pyramid_matches_dense_on_odd_edges_and_holes(tmp_path):
+    baseline_path = tmp_path / "baseline" / "prediction.zarr"
+    sparse_path = tmp_path / "sparse" / "prediction.zarr"
+    shape, chunk_shape = (35, 17, 17), (5, 3, 3)
+    nonempty = {native.ChunkId(0, 0, 0), native.ChunkId(3, 0, 1), native.ChunkId(6, 5, 5)}
+    planned = nonempty | {native.ChunkId(2, 2, 2)}
+    for path, fresh in ((baseline_path, False), (sparse_path, True)):
+        arrays = native.create_output_zarr(path, shape_zyx=shape, chunks_zyx=chunk_shape)
+        for chunk in nonempty:
+            starts, stops = native.chunk_bounds(chunk, chunk_shape_zyx=chunk_shape, array_shape_zyx=shape)
+            region = tuple(slice(start, stop) for start, stop in zip(starts, stops))
+            size = tuple(stop - start for start, stop in zip(starts, stops))
+            arrays[0][region] = np.arange(1, np.prod(size) + 1, dtype=np.uint8).reshape(size)
+        native.build_downsample_levels(arrays, level0_written_chunks=planned, workers=2, fresh_output=fresh)
+
+    def files(path):
+        return {file.relative_to(path): file.read_bytes() for file in path.rglob("*") if file.is_file()}
+
+    assert files(sparse_path) == files(baseline_path)
+    sparse_level1 = open_group(sparse_path)["1"]
+    assert sparse_level1[6, 8, 0] == 0
+
+
+@pytest.mark.parametrize("layout", ["full", "distributed", "clustered"])
+def test_pyramid_chooses_box_by_projected_coverage(tmp_path, monkeypatch, layout):
+    grid = set(itertools.product(range(8), repeat=3))
+    if layout == "distributed":
+        grid = {(z, y, x) for z, y, x in grid if z % 2 == 0 and y % 2 == 0}
+        grid.remove((6, 6, 7))
+        grid.add((7, 7, 7))
+    elif layout == "clustered":
+        grid = {(z, y, x) for z, y, x in grid if z < 2}
+        grid.remove((1, 7, 7))
+        grid.add((7, 7, 7))
+    arrays = native.create_output_zarr(
+        tmp_path / "out.zarr", shape_zyx=(32, 32, 32), chunks_zyx=(4, 4, 4), levels=5,
+    )
+    sparse_levels = []
+    def record(_root, level, **kwargs):
+        if kwargs.get("chunk_indices") is not None:
+            sparse_levels.append(level)
+
+    monkeypatch.setattr(native, "write_pyramid_level", record)
+    targets = {native.ChunkId(*key) for key in grid}
+    native.build_downsample_levels(arrays, level0_written_chunks=targets, fresh_output=True)
+    assert sparse_levels == ([1, 2] if layout == "clustered" else [])
 
 
 def test_plan_only_does_not_load_runtime_or_touch_existing_output(tmp_path, monkeypatch):

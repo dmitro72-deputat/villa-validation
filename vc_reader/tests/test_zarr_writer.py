@@ -160,6 +160,32 @@ def test_write_pyramid_level_ranges_and_multiscales(tmp_path):
     assert entry["datasets"][1]["coordinateTransformations"][1]["translation"] == [0.0, 0.0, 0.0]
 
 
+def test_write_pyramid_level_selects_individual_chunks(tmp_path):
+    level0 = ZarrWriter.create(tmp_path / "0", shape=(9, 9, 9), chunks=(2, 2, 2), dtype="u1")
+    level0[:4, :4, :4] = 9
+    create_pyramid_levels(tmp_path, 1)
+    level1 = ZarrWriter.open(tmp_path / "1")
+    level1[2:4, 2:4, 2:4] = 7
+
+    write_pyramid_level(tmp_path, 1, chunk_indices=[])
+    assert level1.stored_chunks() == [(1, 1, 1)]
+
+    with pytest.raises(ValueError, match="either a chunk range or chunk indices"):
+        write_pyramid_level(
+            tmp_path, 1, chunk_range=((0, 0, 0), (1, 1, 1)), chunk_indices=[(0, 0, 0)]
+        )
+    with pytest.raises(ValueError, match="outside the output grid"):
+        write_pyramid_level(tmp_path, 1, chunk_indices=[(0, 0, 0), (3, 0, 0)])
+    assert level1.stored_chunks() == [(1, 1, 1)]
+
+    write_pyramid_level(tmp_path, 1, threads=2, chunk_indices=[(0, 0, 0), (0, 0, 0)])
+    assert level1.stored_chunks() == [(0, 0, 0), (1, 1, 1)]
+    assert level1[0, 0, 0] == 9
+    assert level1[2, 2, 2] == 7
+    write_pyramid_level(tmp_path, 1, chunk_indices=[(1, 1, 1)])
+    assert level1.stored_chunks() == [(0, 0, 0)]
+
+
 def test_writer_converts_to_numpy(tmp_path):
     writer = ZarrWriter.create(tmp_path / "a", shape=(2, 2), chunks=(2, 2), dtype="u1")
     writer[0, 1] = 5
