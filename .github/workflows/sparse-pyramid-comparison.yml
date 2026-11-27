@@ -1,0 +1,158 @@
+name: Villa sparse pyramid comparison
+
+on:
+  push:
+    branches: [audit/sparse-pyramid-ci]
+    paths:
+      - '.github/workflows/sparse-pyramid-comparison.yml'
+
+permissions:
+  contents: read
+
+env:
+  AGENTS_AGENT_MODE: '1'
+  AGENTS_ALLOW_INSTALL: '1'
+  OPENBLAS_NUM_THREADS: '1'
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Checkout the independent candidate
+        uses: actions/checkout@v4
+        with:
+          path: candidate
+          ref: 60c2431b2648434c0b7122b8953ee10b5ea78a83
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install scikit-build-core cmake ninja pybind11
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            nlohmann-json3-dev \
+            libboost-dev \
+            libconcurrentqueue-dev \
+            libcurl4-openssl-dev \
+            zlib1g-dev \
+            libsqlite3-dev \
+            libblosc-dev \
+            libzstd-dev \
+            liblz4-dev \
+            libtiff-dev \
+            libpng-dev \
+            libjpeg-dev \
+            pkg-config strace
+
+      - name: Build and install Blosc2
+        run: |
+          git clone --depth 1 --branch v2.15.2 \
+            https://github.com/Blosc/c-blosc2.git /tmp/c-blosc2
+          cmake -S /tmp/c-blosc2 -B /tmp/c-blosc2/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DBUILD_TESTS=OFF \
+            -DBUILD_BENCHMARKS=OFF \
+            -DBUILD_EXAMPLES=OFF
+          cmake --build /tmp/c-blosc2/build --parallel 2
+          sudo cmake --install /tmp/c-blosc2/build
+          sudo ldconfig
+          export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/usr/local/lib/x86_64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH}"
+          pkg-config --modversion blosc2
+          pkg-config --atleast-version=2.13 blosc2
+          echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
+
+      - name: Build VC Reader
+        env:
+          CMAKE_ARGS: "-DVC_READER_ENABLE_CUDA=OFF"
+        run: python -m pip install ./candidate/vc_reader pytest
+
+      - name: Compare pyramid output and filesystem calls on Paris 4
+        shell: bash
+        run: |
+          set -euo pipefail
+          path=vesuvius/src/vesuvius/ink_detection/inference/infer_full3d_tifxyz.py
+          script=.github/validation/sparse_pyramid_benchmark.py
+          work="$(mktemp -d)"
+          git -C candidate show "HEAD^:$path" > "$work/baseline.py"
+          declare -A source=([before]="$work/baseline.py" [after]="candidate/$path")
+          python "$script" prepare "${source[after]}" "$work/template"
+          for n in 1 2 3; do
+            order=(before after)
+            if [[ "$n" == 2 ]]; then order=(after before); fi
+            for version in "${order[@]}"; do
+              cp -r "$work/template" "$work/$version"
+              printf '%s trial %s ' "$version" "$n"
+              python "$script" run "${source[$version]}" "$work/$version" | tee -a "$work/$version.jsonl"
+              python "$script" manifest "${source[$version]}" "$work/$version" > "$work/manifest.$version.$n"
+            done
+            diff -qr "$work/before" "$work/after"
+            cmp "$work/manifest.before.1" "$work/manifest.after.$n"
+            rm -r "$work/before" "$work/after"
+          done
+          sha256sum "$work/manifest.before.1"
+          wc -l "$work/manifest.before.1"
+          for version in before after; do
+            root="$work/$version"
+            cp -r "$work/template" "$root"
+            printf '%s under strace\n' "$version"
+            strace -ff -qq -yy -o "$work/$version.syscalls" \
+              -e trace=openat,newfstatat,statx,unlink,unlinkat,rename,renameat,renameat2,getdents64,read,pread64,write,pwrite64,mmap \
+              python "$script" run "${source[$version]}" "$root"
+            printf '%s filesystem calls ' "$version"
+            python "$script" trace "${source[$version]}" "$root" --trace-prefix "$work/$version.syscalls" |
+              tee "$work/$version.trace.json"
+          done
+          diff -qr "$work/before" "$work/after"
+          python - "$work" >> "$GITHUB_STEP_SUMMARY" <<'PYTHON'
+          import json
+          from pathlib import Path
+          import statistics
+          import sys
+
+          work = Path(sys.argv[1])
+          print("### PHerc. Paris. 4 published 3D ink, five level-2 source chunks")
+          print()
+          print("| Variant | Time (s), min / median / max | Peak RSS (MiB), median | Dataset file syscalls | Missing dataset opens | Dataset output write calls |")
+          print("| --- | ---: | ---: | ---: | ---: | ---: |")
+          for version in ("before", "after"):
+              trials = [json.loads(line) for line in (work / f"{version}.jsonl").read_text().splitlines()]
+              seconds = [trial["seconds"] for trial in trials]
+              times = " / ".join(f"{time:.3f}" for time in (min(seconds), statistics.median(seconds), max(seconds)))
+              peak = statistics.median([trial["peak_rss_kib"] / 1024 for trial in trials])
+              traced = json.loads((work / f"{version}.trace.json").read_text())
+              calls = traced["dataset_calls"]
+              writes = calls.get("write", 0) + calls.get("pwrite64", 0)
+              print(f"| {version} | {times} | {peak:.1f} | {sum(calls.values())} | {traced['dataset_enoent'].get('openat', 0)} | {writes} |")
+          print()
+          print("All six output levels, file names, metadata, and encoded chunk bytes matched in every comparison.")
+          PYTHON
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install "./candidate/vesuvius[tests]"
+          python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install zarr scipy opencv-python-headless einops tqdm numba imagecodecs timm huggingface-hub fsspec aiohttp accelerate wandb pytorch-optimizer matplotlib scikit-image scikit-learn psutil click
+
+      - name: Run offline ink detection regressions
+        working-directory: candidate/vesuvius
+        run: python -m pytest -v -m 'not slow and not network' tests/ink_detection
+
+
+      - name: Run the Zarr writer tests
+        run: python -m pytest -q candidate/vc_reader/tests/test_zarr_writer.py
