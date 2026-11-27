@@ -23,7 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 8
+          fetch-depth: 16
           persist-credentials: false
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -111,5 +111,7 @@ jobs:
             grep -E 'target_chunks=1 inference_patches=1' "$work/$variant.log"
           done
           diff -qr "$work/upstream/prediction.zarr" "$work/hardened/prediction.zarr"
-          cd "$work/hardened/prediction.zarr"
-          find . -type f -print0 | sort -z | xargs -0 sha256sum
+          (
+            cd "$work/hardened/prediction.zarr"
+            find . -type f -print0 | sort -z | xargs -0 sha256sum
+          )

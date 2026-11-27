@@ -4,7 +4,6 @@ on:
     branches: [audit/villa-hardening]
     paths:
       - '.github/workflows/hardening-linux.yml'
-      - '.github/validation/*.py'
   workflow_dispatch:
 permissions:
   contents: read
@@ -23,7 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 8
+          fetch-depth: 16
           persist-credentials: false
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -149,23 +148,32 @@ jobs:
             rm -r "$work/template"
           done
 
-      - name: Repeat the full CPU pipeline and verify the prior pristine manifest
+      - name: Compare the complete CPU pipeline on one runner
         shell: bash
         run: |
           set -euo pipefail
           work="$(mktemp -d)"
+          relative=vesuvius/src/vesuvius/ink_detection/inference/infer_full3d_tifxyz.py
+          source="$PWD/$relative"
           export PYTHONPATH="$PWD/vesuvius/src"
           script=.github/validation/cpu_fixture.py
+          cp "$source" "$work/hardened.py"
+          trap 'cp "$work/hardened.py" "$source"' EXIT
+          git show "659e2fadb836d44063ed831d85517154ec852f11:$relative" > "$work/upstream.py"
           python "$script" prepare-ct "$work/fixture"
-          python -m vesuvius.ink_detection.inference.infer_full3d_tifxyz \
-            "$work/fixture/mesh" "$work/fixture/fixture.pth" "$work/prediction.zarr" \
-            --device cpu --resolution 0 --overlap 0 --chunk-halo 0 --write-region occupied \
-            --no-compile --batch-size 2 --num-workers 0 --downsample-workers 2
-          python "$script" inspect "$work/prediction.zarr" | tee "$work/manifest.txt"
-          (
-            cd "$work"
-            printf '31e9afc534ff75459cdc81aeff1db22a4cb4ffa8c9e135cfc0884622b5b3520d  manifest.txt\n' | sha256sum -c -
-          )
+          for variant in upstream hardened; do
+            cp "$work/$variant.py" "$source"
+            mkdir -p "$work/$variant"
+            python -m vesuvius.ink_detection.inference.infer_full3d_tifxyz \
+              "$work/fixture/mesh" "$work/fixture/fixture.pth" "$work/$variant/prediction.zarr" \
+              --device cpu --resolution 0 --overlap 0 --chunk-halo 0 --write-region occupied \
+              --no-compile --batch-size 2 --num-workers 0 --downsample-workers 2
+            python "$script" inspect "$work/$variant/prediction.zarr" > "$work/$variant.txt"
+            sha256sum "$work/$variant.txt"
+          done
+          diff -qr "$work/upstream/prediction.zarr" "$work/hardened/prediction.zarr"
+          cmp "$work/upstream.txt" "$work/hardened.txt"
+          cat "$work/hardened.txt"
 
       - name: Run native ink and Zarr suites
         run: |
