@@ -726,12 +726,9 @@ def build_downsample_levels(
         return
     source_shape = tuple(arrays[0].shape)
     source_chunks = tuple(arrays[0].chunks)
-    indices = np.fromiter(
-        ((chunk.z, chunk.y, chunk.x) for chunk in level0_written_chunks),
-        dtype=np.dtype((np.int64, 3)), count=len(level0_written_chunks),
-    )
-    lower = tuple(map(int, indices.min(axis=0)))
-    upper = tuple(map(int, indices.max(axis=0)))
+    indices = {(chunk.z, chunk.y, chunk.x) for chunk in level0_written_chunks}
+    bounds = [(min(axis), max(axis)) for axis in zip(*indices)]
+    lower, upper = zip(*bounds)
     starts = [lo * size for lo, size in zip(lower, source_chunks)]
     stops = [min((hi + 1) * size, length) for hi, size, length in zip(upper, source_chunks, source_shape)]
     # At native levels, chunk edges remain aligned: every input chunk maps
@@ -756,7 +753,7 @@ def build_downsample_levels(
         begin = [start // size for start, size in zip(starts, chunks)]
         end = [-(-stop // size) for stop, size in zip(stops, chunks)]
         if track_coverage:
-            indices = np.unique(indices // 2, axis=0)
+            indices = {(z // 2, y // 2, x // 2) for z, y, x in indices}
             if len(indices) < math.prod(hi - lo for lo, hi in zip(begin, end)):
                 write_pyramid_level(root, level, threads=threads, chunk_indices=indices)
                 continue
