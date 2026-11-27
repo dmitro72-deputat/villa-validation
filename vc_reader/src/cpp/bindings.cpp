@@ -905,7 +905,7 @@ NB_MODULE(_reader, m)
         nb::gil_scoped_release release;
         vcr::zarr::writePyramidLevel(vcr::utf8Path(root), level, options, range, {}, std::move(chunkIndices));
     }, "root"_a, "level"_a, "factors"_a, "reduction"_a, "threads"_a, "begin"_a.none(), "end"_a.none(),
-       "chunk_indices"_a = nb::none());
+       "chunk_indices"_a.none() = nb::none());
     m.def("write_pyramid", [pyramidOptions](const std::string& root, int levels, const std::array<int, 3>& factors,
                                             const std::string& reduction, std::size_t threads, bool overwrite) {
         const auto options = pyramidOptions(levels, factors, reduction, threads);
