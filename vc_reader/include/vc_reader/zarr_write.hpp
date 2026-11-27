@@ -203,9 +203,12 @@ struct ChunkRange {
 // Writes `level` from level - 1 on disk. Chunks that come out entirely fill are not
 // stored. Separate processes may write disjoint ranges. Integer means round to nearest,
 // ties to even. `progress(done, total)` may run on any worker.
+// `chunkIndices` selects individual output chunks instead of a range. Repeated
+// indices are written once. An empty selection writes nothing.
 void writePyramidLevel(const std::filesystem::path& root, int level, const PyramidOptions& options,
                        const std::optional<ChunkRange>& range = std::nullopt,
-                       const std::function<void(std::size_t, std::size_t)>& progress = {});
+                       const std::function<void(std::size_t, std::size_t)>& progress = {},
+                       std::optional<std::vector<Index>> chunkIndices = std::nullopt);
 
 // Creates and writes every level above the level 0 stored at <root>/0.
 void writePyramid(const std::filesystem::path& root, const PyramidOptions& options, bool overwrite = false);
